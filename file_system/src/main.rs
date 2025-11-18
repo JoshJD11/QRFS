@@ -4,6 +4,8 @@ use rustc_serialize::json::{self, Json};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::env;
+use std::time::Duration;
+use std::ffi::OsStr;
 
 use fuser::{
     FileAttr, FileType, Filesystem, Request,
@@ -74,11 +76,44 @@ impl JsonFilesystem {
 impl Filesystem for JsonFilesystem {
 
     fn getattr(&mut self, _req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
-        if let Some(attr) = self.attrs.get(&ino) {
-            reply.attr(&std::time::Duration::from_secs(1), attr);
-        } else {
-            reply.error(ENOENT);
+        println!("getattr(ino={})", ino);
+        match self.attrs.get(&ino) {
+            Some(attr) => {
+                let ttl = Duration::from_secs(1);
+                reply.attr(&ttl, attr);
+            },
+            None => reply.error(ENOENT),
         }
+    }
+
+    fn read(&mut self, _req: &Request, ino: u64, fh: u64, offset: i64, size: u32, _flags: i32, _lock_owner: Option<u64>, reply: ReplyData) {
+        println!("read(ino={}, fh={}, offset={}, size={})", ino, fh, offset, size);
+        for (key, &inode) in self.inodes.iter() {
+            if inode == ino {
+                let value = self.tree.get(key).unwrap();
+                reply.data(value.pretty().to_string().as_bytes());
+                return ;
+            }
+        }
+        reply.error(ENOENT);
+    }
+
+    fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
+        println!("lookup(parent={}, name={})", parent, name.display());
+        let inode = match self.inodes.get(name.to_str().unwrap()) {
+            Some(inode) => inode,
+            None => {
+                reply.error(ENOENT);
+                return ;
+            },
+        };
+        match self.attrs.get(inode) {
+            Some(attr) => {
+                let ttl = Duration::from_secs(1);
+                reply.entry(&ttl, attr, 0);
+            },
+            None => reply.error(ENOENT),
+        };
     }
 
     fn readdir(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, mut reply: ReplyDirectory) {
@@ -132,7 +167,6 @@ fn main() {
         Err(e) => println!("ERROR MOUNTING: {:?}", e),
     }
 }
-
 
 // Note: if you cloned the repository, you have to make a dir to mount the fs out of the repo
 // run with cargo run -- ~/Desktop/fs
