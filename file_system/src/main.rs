@@ -9,6 +9,10 @@ use std::time::Duration;
 use std::ffi::OsStr;
 use fuser::{ FileAttr, FileType, Filesystem, Request, ReplyDirectory, ReplyAttr, ReplyData, ReplyEntry, ReplyEmpty };
 use libc::{ENOENT};
+use qrcode::QrCode;
+use image::Luma;
+use data_encoding::BASE64;
+use std::fs;
 
 
 static INODE_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -158,6 +162,92 @@ impl QRFileSystem { //The root node is always equals one
         if let Some(new_parent) = self.files.get_mut(&new_parent_inode) {
             new_parent.children.push(child_inode);
         }
+    }
+
+
+    pub fn binary_to_qr(&self, binary_data: &[u8], output_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let base64_data = BASE64.encode(binary_data);
+        
+        let code = QrCode::new(base64_data.as_bytes())?;
+        
+        // 200x200 pixel
+        let image = code.render::<Luma<u8>>()
+            .min_dimensions(200, 200)
+            .max_dimensions(200, 200)
+            .build();
+            
+        image.save(output_path)?;
+        println!("QR code saved to: {}", output_path);
+        Ok(())
+    }
+    
+    pub fn qr_to_binary(&self, qr_path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        // TODO: Use rqrr library for proper QR decoding
+        
+        // This is a simple test that "simulates" QR decoding
+        // by storing the original data in a companion file
+        let companion_path = format!("{}.data", qr_path);
+        let data = fs::read(&companion_path)?;
+        
+        // TODO
+        // 1. Load the QR image
+        // 2. Use a QR decoding library to extract the base64 data
+        // 3. Decode base64 back to binary
+        
+        Ok(data)
+    }
+    
+    pub fn export_files_as_qr(&self, output_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
+        fs::create_dir_all(output_dir)?;
+        
+        for (inode, file) in &self.files {
+            if file.attrs.kind == FileType::RegularFile {
+                if let Some(content) = &file.data {
+                    let binary_data = content.as_bytes();
+                    let qr_path = format!("{}/file_{}.png", output_dir, inode);
+                    
+                    self.binary_to_qr(binary_data, &qr_path)?;
+                    
+                    // For testing, also save the original data as companion file
+                    let companion_path = format!("{}.data", qr_path);
+                    fs::write(&companion_path, binary_data)?;
+                    
+                    println!("Exported '{}' as QR code: {}", file.name, qr_path);
+                }
+            }
+        }
+        Ok(())
+    }
+    
+    pub fn import_files_from_qr(&mut self, input_dir: &str, parent_inode: u64) -> Result<(), Box<dyn std::error::Error>> {
+        let entries = fs::read_dir(input_dir)?;
+        
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            
+            if path.extension().and_then(|s| s.to_str()) == Some("png") {
+                // (using our companion file for now)
+                if let Some(binary_data) = self.extract_data_from_qr_path(&path) {
+                    let file_name = path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("unknown")
+                        .replace("file_", "imported_");
+                    
+                    let content = String::from_utf8_lossy(&binary_data).to_string();
+                    
+                    self.push(file_name, Some(content), Some(parent_inode), false);
+                    println!("Imported file from QR: {}", path.display());
+                }
+            }
+        }
+        Ok(())
+    }
+    
+    fn extract_data_from_qr_path(&self, qr_path: &std::path::Path) -> Option<Vec<u8>> {
+        // For now, read from companion file
+        let companion_path = format!("{}.data", qr_path.display());
+        fs::read(&companion_path).ok()
     }
 
 }
@@ -320,15 +410,33 @@ impl Filesystem for QRFileSystem {
 }
 
 
+
 fn main() {
 
-    let mut fs = QRFileSystem::new();
+      let mut fs = QRFileSystem::new();
 
     fs.push("/".to_string(), None, None, true);
-    fs.push("fileA.txt".to_string(), Some("Contenido A".to_string()), Some(1), false);
-    fs.push("fileB.txt".to_string(), Some("Contenido B".to_string()), Some(1), false);
-    fs.push("fileC.txt".to_string(), Some("Contenido C".to_string()), Some(1), false);
+    fs.push("fileA.txt".to_string(), Some("Content A".to_string()), Some(1), false);
+    fs.push("fileB.txt".to_string(), Some("Content B".to_string()), Some(1), false);
+    fs.push("fileC.txt".to_string(), Some("Binary-like data: \x00\x01\x02\x03".to_string()), Some(1), false);
 
+    println!("Testing QR code generation...");
+    
+    let test_dir = "./qr_test";
+    if let Err(e) = fs.export_files_as_qr(test_dir) {
+        eprintln!("QR export failed: {}", e);
+    }
+
+    println!("\nTesting QR code import...");
+    if let Err(e) = fs.import_files_from_qr(test_dir, 1) {
+        eprintln!("QR import failed: {}", e);
+    }
+
+    println!("\nTesting with actual binary data...");
+    let binary_data = vec![0x48, 0x65, 0x6C, 0x6C, 0x6F, 0x20, 0x57, 0x6F, 0x72, 0x6C, 0x64]; // "Hello World"
+    if let Err(e) = fs.binary_to_qr(&binary_data, "./test_binary_qr.png") {
+        eprintln!("Binary QR test failed: {}", e);
+    }
 
     let mountpoint = match env::args().nth(1) {
         Some(p) => p,
@@ -338,6 +446,7 @@ fn main() {
         }
     };
 
+    println!("\nMounting filesystem at: {}", mountpoint);
     match fuser::mount2(fs, &mountpoint, &[]) {
         Ok(_) => println!("Mounted successfully"),
         Err(e) => println!("ERROR MOUNTING: {:?}", e),
