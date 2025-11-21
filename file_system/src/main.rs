@@ -200,6 +200,12 @@ impl Filesystem for QRFileSystem {
 
     // }
 
+    fn mkdir(&mut self, _req: &Request, parent: u64, name: &OsStr, _mode: u32, _umask: u32, _reply: ReplyEntry) {
+        let file_name = name.to_str().unwrap().to_string();
+        self.push(file_name, None, Some(parent), true);
+        // reply.ok();
+        return ;
+    }
 
     fn rmdir(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
         let file_name = name.to_str().unwrap().to_string();
@@ -325,7 +331,7 @@ fn main() {
     let mut fs = QRFileSystem::new();
 
     fs.push("/".to_string(), None, None, true);
-    fs.push("fileA.txt".to_string(), Some("Contenido A".to_string()), Some(1), false);
+    fs.push("pingapeta".to_string(), Some("Contenido A".to_string()), Some(1), true);
     fs.push("fileB.txt".to_string(), Some("Contenido B".to_string()), Some(1), false);
     fs.push("fileC.txt".to_string(), Some("Contenido C".to_string()), Some(1), false);
 
