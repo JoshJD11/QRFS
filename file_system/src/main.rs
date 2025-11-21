@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::env;
 use std::time::Duration;
 use std::ffi::OsStr;
-use fuser::{ FileAttr, FileType, Filesystem, Request, ReplyDirectory, ReplyAttr, ReplyData, ReplyEntry, ReplyEmpty };
+use fuser::{ FileAttr, FileType, Filesystem, Request, ReplyDirectory, ReplyAttr, ReplyData, ReplyEntry, ReplyEmpty, ReplyOpen };
 use libc::{ENOENT};
 
 
@@ -29,7 +29,11 @@ impl File {
 
         let attr = FileAttr {
             ino: id,
-            size: 0,
+            size: if file_data.is_some() {
+                file_data.as_ref().unwrap().len() as u64
+            } else {
+                0
+            },
             blocks: 0,
             atime: std::time::SystemTime::now(),
             mtime: std::time::SystemTime::now(),
@@ -166,7 +170,7 @@ impl QRFileSystem { //The root node is always equals one
 impl Filesystem for QRFileSystem {
 
     fn getattr(&mut self, _req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
-        println!("getattr(ino={})", ino);
+        // println!("getattr(ino={})", ino);
         match self.files.get(&ino) {
             Some(file) => {
                 let attr = &file.attrs;
@@ -200,6 +204,13 @@ impl Filesystem for QRFileSystem {
 
     // }
 
+
+    // fn open(&mut self, _req: &Request, ino: u64, _flags: i32, reply: ReplyOpen) {
+    //     println!("open called for ino={}", ino);
+    //     reply.opened(ino, 0);
+    // }
+
+
     fn mkdir(&mut self, _req: &Request, parent: u64, name: &OsStr, _mode: u32, _umask: u32, _reply: ReplyEntry) {
         let file_name = name.to_str().unwrap().to_string();
         self.push(file_name, None, Some(parent), true);
@@ -219,8 +230,9 @@ impl Filesystem for QRFileSystem {
     // }
 
 
-    fn read(&mut self, _req: &Request, ino: u64, fh: u64, offset: i64, size: u32, _flags: i32, _lock_owner: Option<u64>, reply: ReplyData) {
-        println!("read(ino={}, fh={}, offset={}, size={})", ino, fh, offset, size);
+    fn read(&mut self, _req: &Request, ino: u64, _fh: u64, _offset: i64, _size: u32, _flags: i32, _lock_owner: Option<u64>, reply: ReplyData) {
+
+        println!("test1");
 
         let file = match self.files.get(&ino) {
             Some(f) => f,
@@ -230,10 +242,14 @@ impl Filesystem for QRFileSystem {
             }
         };
 
+        println!("test2");
+
         if file.attrs.kind == FileType::Directory {
             reply.error(ENOENT);
             return ;
         }
+
+        println!("test3");
 
         let data = match &file.data {
             Some(d) => d,
@@ -242,6 +258,8 @@ impl Filesystem for QRFileSystem {
                 return ;
             }
         };
+
+        println!("{}", data);
 
         reply.data(data.as_bytes()); // If data wasn't a string, you have to apply pretty() and to_string() before apply as_bytes()
     }
