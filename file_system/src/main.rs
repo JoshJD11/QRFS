@@ -200,6 +200,43 @@ impl Filesystem for QRFileSystem {
     // }
 
 
+    fn access(&mut self, _req: &Request, ino: u64, mask: i32, reply: ReplyEmpty) {
+    
+        println!("Calling to access...");
+
+        let file = match self.files.get(&ino) {
+            Some(f) => f,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let perm = file.attrs.perm;
+
+        const R_OK: i32 = 4;
+        const W_OK: i32 = 2;
+        const X_OK: i32 = 1;
+
+        if (mask & R_OK) != 0 && (perm & 0o444 == 0) {
+            reply.error(libc::EACCES);
+            return;
+        }
+
+        if (mask & W_OK) != 0 && (perm & 0o222 == 0) {
+            reply.error(libc::EACCES);
+            return;
+        }
+
+        if (mask & X_OK) != 0 && (perm & 0o111 == 0) {
+            reply.error(libc::EACCES);
+            return;
+        }
+
+        reply.ok();
+    }
+
+
     fn create(&mut self, _req: &Request, parent: u64, name: &OsStr, _mode: u32, _umask: u32, flags: i32, reply: ReplyCreate) {
         let file_name = name.to_str().unwrap().to_string();
         self.push(file_name, None, Some(parent), false);
