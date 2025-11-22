@@ -4,3 +4,7 @@ qr_test/
 *.rs.bk
 *.pdb
 *.png
+
+# others
+.idea/
+.vscode/
