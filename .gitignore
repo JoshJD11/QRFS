@@ -1,4 +1,6 @@
 target/
+qr_test/
 **/target/
 *.rs.bk
 *.pdb
+*.png
