@@ -226,7 +226,8 @@ impl QRFileSystem {
                 if let Some(content) = &file.data {
                     let binary_data = content.as_bytes();
                     let sanitized_name = file.name.replace("/", "_").replace("..", "_"); // Simple sanitization to avoid path traversal
-                    let qr_path = format!("{}/file_{}_{}.png", output_dir, inode, sanitized_name);
+                    // let qr_path = format!("{}/file_{}_{}.png", output_dir, inode, sanitized_name);
+                    let qr_path = format!("{}/{}.png", output_dir, sanitized_name);
                     
                     self.binary_to_qr(&binary_data, &qr_path)?;
                     println!("Exported '{}' as QR code: {}", file.name, qr_path);
@@ -431,20 +432,21 @@ fn main() {
 
     // Create initial file structure with different data types
     fs.push("/".to_string(), None, None, true);
-    fs.push("text_file.txt".to_string(), Some(FileData::Text("Hello, World!\n".to_string())), Some(1), false);
-    fs.push("binary_file.bin".to_string(), Some(FileData::Binary(vec![0x00, 0x01, 0x02, 0x03, 0xFF])), Some(1), false);
-    
-    // Run comprehensive tests first
-    println!("=== Running QR Code Tests ===");
-    if let Err(e) = fs.run_comprehensive_tests() {
-        eprintln!("Test failed: {}", e);
-    }
-
-    println!("\n=== Exporting Files as QR Codes ===");
     let test_dir = "./qr_test";
-    if let Err(e) = fs.export_files_as_qr(test_dir) {
-        eprintln!("QR export failed: {}", e);
-    }
+
+    // fs.push("text_file.txt".to_string(), Some(FileData::Text("Hello, World!\n".to_string())), Some(1), false);
+    // fs.push("binary_file.bin".to_string(), Some(FileData::Binary(vec![0x00, 0x01, 0x02, 0x03, 0xFF])), Some(1), false);
+    
+    // // Run comprehensive tests first
+    // println!("=== Running QR Code Tests ===");
+    // if let Err(e) = fs.run_comprehensive_tests() {
+    //     eprintln!("Test failed: {}", e);
+    // }
+
+    // println!("\n=== Exporting Files as QR Codes ===");
+    // if let Err(e) = fs.export_files_as_qr(test_dir) {
+    //     eprintln!("QR export failed: {}", e);
+    // }
 
     println!("\n=== Importing Files from QR Codes ===");
     if let Err(e) = fs.import_files_from_qr(test_dir, 1) {
