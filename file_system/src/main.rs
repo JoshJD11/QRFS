@@ -221,12 +221,12 @@ impl QRFileSystem {
     pub fn export_files_as_qr(&self, output_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
         fs::create_dir_all(output_dir)?;
         
-        for (inode, file) in &self.files {
+        for (_inode, file) in &self.files {
             if file.attrs.kind == FileType::RegularFile {
                 if let Some(content) = &file.data {
                     let binary_data = content.as_bytes();
                     let sanitized_name = file.name.replace("/", "_").replace("..", "_"); // Simple sanitization to avoid path traversal
-                    // let qr_path = format!("{}/file_{}_{}.png", output_dir, inode, sanitized_name);
+                    // let qr_path = format!("{}/file_{}_{}.png", output_dir, _inode, sanitized_name);
                     let qr_path = format!("{}/{}.png", output_dir, sanitized_name);
                     
                     self.binary_to_qr(&binary_data, &qr_path)?;
