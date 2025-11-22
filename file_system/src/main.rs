@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::env;
 use std::time::Duration;
 use std::ffi::OsStr;
-use fuser::{ FileAttr, FileType, Filesystem, Request, ReplyDirectory, ReplyAttr, ReplyData, ReplyEntry, ReplyEmpty, ReplyOpen };
+use fuser::{ FileAttr, FileType, Filesystem, Request, ReplyDirectory, ReplyAttr, ReplyData, ReplyEntry, ReplyEmpty, ReplyOpen, ReplyCreate };
 use libc::{ENOENT};
 
 
@@ -200,25 +200,36 @@ impl Filesystem for QRFileSystem {
     // }
 
 
-    // fn create(&mut self, _req: &Request, parent: u64, name: &OsStr, mode: u32, umask: u32, flags: i32, reply: ReplyCreate) {
+    fn create(&mut self, _req: &Request, parent: u64, name: &OsStr, _mode: u32, _umask: u32, flags: i32, reply: ReplyCreate) {
+        let file_name = name.to_str().unwrap().to_string();
+        self.push(file_name, None, Some(parent), false);
+        let actual_inode = INODE_COUNTER.load(Ordering::Relaxed) - 1;
+        
+        match self.files.get(&actual_inode) {
+            Some(file) => {
+                let attr = &file.attrs;
+                let ttl = Duration::from_secs(1);
+                reply.created(&ttl, attr, 0, 0, flags.try_into().unwrap());
+            },
+            None => reply.error(ENOENT),
+        }
+    }
 
-    // }
+
+    fn open(&mut self, _req: &Request, ino: u64, _flags: i32, reply: ReplyOpen) {
+        println!("open called for ino={}", ino);
+        reply.opened(0, 0);
+    }
 
 
-    // fn open(&mut self, _req: &Request, ino: u64, _flags: i32, reply: ReplyOpen) {
-    //     println!("open called for ino={}", ino);
-    //     reply.opened(ino, 0);
-    // }
-
-
-    fn mkdir(&mut self, _req: &Request, parent: u64, name: &OsStr, _mode: u32, _umask: u32, _reply: ReplyEntry) {
+    fn mkdir(&mut self, _req: &Request, parent: u64, name: &OsStr, _mode: u32, _umask: u32, _reply: ReplyEntry) { // we have to add the child to the parent
         let file_name = name.to_str().unwrap().to_string();
         self.push(file_name, None, Some(parent), true);
         // reply.ok();
         return ;
     }
 
-    fn rmdir(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+    fn rmdir(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) { // we have to delete the child from the parent
         let file_name = name.to_str().unwrap().to_string();
         self.delete_file(parent, file_name);
         reply.ok();
@@ -232,8 +243,6 @@ impl Filesystem for QRFileSystem {
 
     fn read(&mut self, _req: &Request, ino: u64, _fh: u64, _offset: i64, _size: u32, _flags: i32, _lock_owner: Option<u64>, reply: ReplyData) {
 
-        println!("test1");
-
         let file = match self.files.get(&ino) {
             Some(f) => f,
             None => {
@@ -242,14 +251,10 @@ impl Filesystem for QRFileSystem {
             }
         };
 
-        println!("test2");
-
         if file.attrs.kind == FileType::Directory {
             reply.error(ENOENT);
             return ;
         }
-
-        println!("test3");
 
         let data = match &file.data {
             Some(d) => d,
@@ -259,7 +264,7 @@ impl Filesystem for QRFileSystem {
             }
         };
 
-        println!("{}", data);
+        // println!("{}", data);
 
         reply.data(data.as_bytes()); // If data wasn't a string, you have to apply pretty() and to_string() before apply as_bytes()
     }
@@ -304,7 +309,7 @@ impl Filesystem for QRFileSystem {
     }
 
 
-    fn readdir(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, mut reply: ReplyDirectory) {
+    fn readdir(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, mut reply: ReplyDirectory) { 
 
         let dir = match self.files.get(&ino) {
             Some(f) => f,
