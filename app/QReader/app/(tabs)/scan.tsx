@@ -10,11 +10,11 @@ export default function Home() {
 
   return (
     <SafeAreaView style={styles.container}>
-      <Stack.Screen options={{ title: "Overview", headerShown: false }} />
+      <Stack.Screen options={{ title: "Scan", headerShown: false }} />
       <Text style={styles.title}>QR Code Scanner</Text>
       <View style={{ gap: 20 }}>
         <Pressable onPress={requestPermission}>
-          <Text style={styles.buttonStyle}>Request Permissions</Text>
+          <Text style={[styles.buttonStyle, {opacity: !isPermissionGranted ? 1 : 0.5}]}>Request Permissions</Text>
         </Pressable>
         <Link href={"../scanner"} asChild>
           <Pressable disabled={!isPermissionGranted}>
