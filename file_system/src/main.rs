@@ -9,15 +9,15 @@ use qrcode::QrCode;
 use image::Luma;
 use data_encoding::BASE64;
 use std::fs;
-use std::io;
 
-static INODE_COUNTER: AtomicU64 = AtomicU64::new(1);
+static INODE_COUNTER: AtomicU64 = AtomicU64::new(2); // Start from 2, 1 is reserved for root
 
-#[derive(Clone)]
+use serde::{Serialize, Deserialize};
+
+#[derive(Clone, Serialize, Deserialize)]
 enum FileData {
     Text(String),
     Binary(Vec<u8>),
-    Json(serde_json::Value), // need serde_json for this
 }
 
 impl FileData {
@@ -25,7 +25,6 @@ impl FileData {
         match self {
             FileData::Text(s) => s.as_bytes().to_vec(),
             FileData::Binary(b) => b.clone(),
-            FileData::Json(v) => v.to_string().into_bytes(),
         }
     }
     
@@ -34,17 +33,28 @@ impl FileData {
     }
 }
 
+// Simplified: Only store file names and their QR block assignments, we could add FileAttrs to FileEntry if needed (later)
+#[derive(Serialize, Deserialize, Debug)]
+struct FilesystemMetadata {
+    pub version: u32,
+    pub files: Vec<FileEntry>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct FileEntry {
+    pub name: String,
+    pub qr_blocks: Vec<u32>,
+}
+
 struct File {
     pub inode: u64,
     pub name: String,
     pub data: Option<FileData>,
-    pub parent: Option<u64>,
-    pub children: Vec<u64>,
     pub attrs: FileAttr,
 }
 
 impl File {
-    pub fn new(file_name: String, data: Option<FileData>, parent_inode: Option<u64>, folder_flag: bool) -> Self {
+    pub fn new(file_name: String, data: Option<FileData>) -> Self {
         let id: u64 = INODE_COUNTER.fetch_add(1, Ordering::Relaxed);
 
         let size = data.as_ref().map(|d| d.size()).unwrap_or(0);
@@ -57,12 +67,8 @@ impl File {
             mtime: std::time::SystemTime::now(),
             ctime: std::time::SystemTime::now(),
             crtime: std::time::SystemTime::now(),
-            kind: if folder_flag {
-                FileType::Directory
-            } else {
-                FileType::RegularFile
-            },
-            perm: 0o755,
+            kind: FileType::RegularFile,
+            perm: 0o644,
             nlink: 0,
             uid: 0,
             gid: 0,
@@ -75,103 +81,33 @@ impl File {
             inode: id,
             name: file_name,
             data,
-            parent: parent_inode,
-            children: Vec::new(),
             attrs: attr,
         }
     }
 }
 
 struct QRFileSystem {
-    pub files: HashMap<u64, File>,
+    pub root_inode: u64,
+    pub files: HashMap<u64, File>, // All files (root is separate)
 }
 
 impl QRFileSystem {
     pub fn new() -> Self {
         Self {
+            root_inode: 1,
             files: HashMap::new(),
         }
     }
 
-    pub fn push(&mut self, file_name: String, data: Option<FileData>, parent_inode: Option<u64>, folder_flag: bool) {
-        let file: File = File::new(file_name, data, parent_inode, folder_flag);
+    pub fn add_file(&mut self, file_name: String, data: Option<FileData>) -> u64 {
+        let file = File::new(file_name, data);
         let inode = file.inode;
         self.files.insert(inode, file);
-
-        if let Some(pid) = parent_inode {
-            if let Some(parent) = self.files.get_mut(&pid) {
-                parent.children.push(inode);
-            }
-        }
+        inode
     }
 
-    pub fn pop_recursively(&mut self, inode: u64) {
-        if let Some(file) = self.files.get(&inode) {
-            let children = file.children.clone();
-            for child_inode in children {
-                self.pop_recursively(child_inode);
-            }
-        }
+    pub fn remove_file(&mut self, inode: u64) {
         self.files.remove(&inode);
-    }
-
-    pub fn delete_file(&mut self, parent_inode: u64, file_name: String) {
-        let mut target_inode: Option<u64> = None;
-
-        if let Some(parent_file) = self.files.get(&parent_inode) {
-            for &child_inode in &parent_file.children {
-                if let Some(child) = self.files.get(&child_inode) {
-                    if child.name == file_name {
-                        target_inode = Some(child_inode);
-                        break;
-                    }
-                }
-            }
-        }
-
-        let target_inode = match target_inode {
-            Some(i) => i,
-            None => return,
-        };
-
-        if let Some(parent_file) = self.files.get_mut(&parent_inode) {
-            parent_file.children.retain(|&x| x != target_inode);
-        }
-
-        self.pop_recursively(target_inode);
-    }
-
-    pub fn rename(&mut self, old_parent_inode: u64, file_old_name: String, new_parent_inode: u64, file_new_name: String) {
-        let mut found_child_inode: Option<u64> = None;
-
-        if let Some(parent_file) = self.files.get(&old_parent_inode) {
-            for &child_inode in &parent_file.children {
-                if let Some(child) = self.files.get(&child_inode) {
-                    if child.name == file_old_name {
-                        found_child_inode = Some(child_inode);
-                        break;
-                    }
-                }
-            }
-        }
-
-        let child_inode = match found_child_inode {
-            Some(i) => i,
-            None => return,
-        };
-
-        if let Some(child) = self.files.get_mut(&child_inode) {
-            child.name = file_new_name;
-            child.parent = Some(new_parent_inode);
-        }
-
-        if let Some(parent_file) = self.files.get_mut(&old_parent_inode) {
-            parent_file.children.retain(|&x| x != child_inode);
-        }
-
-        if let Some(new_parent) = self.files.get_mut(&new_parent_inode) {
-            new_parent.children.push(child_inode);
-        }
     }
 
     pub fn binary_to_qr(&self, binary_data: &[u8], output_path: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -179,14 +115,12 @@ impl QRFileSystem {
         
         let code = QrCode::new(base64_data.as_bytes())?;
         
-        // Render as 200x200 pixel image
         let image = code.render::<Luma<u8>>()
             .min_dimensions(200, 200)
             .max_dimensions(200, 200)
             .build();
             
         image.save(output_path)?;
-        println!("QR code saved to: {}", output_path);
         Ok(())
     }
     
@@ -208,272 +142,302 @@ impl QRFileSystem {
         Ok(binary_data)
     }
     
-    pub fn test_qr_roundtrip(&self, test_data: &[u8]) -> Result<bool, Box<dyn std::error::Error>> {
-        let temp_path = "./test_qr_roundtrip.png";
-        self.binary_to_qr(test_data, temp_path)?;
-        let decoded_data = self.qr_to_binary(temp_path)?;
-        let _ = fs::remove_file(temp_path);
+    fn split_data_for_qr(&self, data: &[u8]) -> Vec<Vec<u8>> {
+        const MAX_QR_DATA_SIZE: usize = 1500;
         
-        Ok(test_data == decoded_data.as_slice())
+        let mut chunks = Vec::new();
+        let mut remaining = data;
+        
+        while !remaining.is_empty() {
+            let chunk_size = std::cmp::min(MAX_QR_DATA_SIZE, remaining.len());
+            chunks.push(remaining[..chunk_size].to_vec());
+            remaining = &remaining[chunk_size..];
+        }
+        
+        chunks
     }
     
     pub fn export_files_as_qr(&self, output_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
         fs::create_dir_all(output_dir)?;
         
-        // the idea is that each QR is a block of data representing a file or part of it (if too large)
-        // the first QRs will be the directory file of the FileSystem, indicating structure such as name (begin block (QR) and end block (QR))
-        // after some mark (the end of the directory files), the files will be stored as QRs
-        let mut index : u32 = 1;
+        println!("Exporting filesystem structure...");
+        
+        let mut metadata = FilesystemMetadata {
+            version: 1,
+            files: Vec::new(),
+        };
+        
         for (_inode, file) in &self.files {
-            if file.attrs.kind == FileType::RegularFile {
-                if let Some(content) = &file.data {
-                    let binary_data = content.as_bytes();
-                    let qr_path = format!("{}/file_{}.png", output_dir, index);
-                    index += 1;
-                    self.binary_to_qr(&binary_data, &qr_path)?;
-                    println!("Exported '{}' as QR code: {}", file.name, qr_path);
-                }
-            }
+            let entry = FileEntry {
+                name: file.name.clone(),
+                qr_blocks: Vec::new(), // Will be filled when we export data
+            };
+            metadata.files.push(entry);
+            println!("  - {}", file.name);
         }
-        Ok(())
-    }
-    
-    pub fn import_files_from_qr(&mut self, input_dir: &str, parent_inode: u64) -> Result<(), Box<dyn std::error::Error>> {
-        let entries = fs::read_dir(input_dir)?;
         
-        // the first QRs will be the directory file of the FileSystem, that will be used to reconstruct structure
-        // after some mark (the end of the directory files), the next QRs will be the files to import following the structure suggested by the directory files
-
-        for entry in entries {
-            let entry = entry?;
-            let path = entry.path();
-            
-            if path.extension().and_then(|s| s.to_str()) == Some("png") {
-                match self.qr_to_binary(path.to_str().unwrap()) {
-                    Ok(binary_data) => {
-                        // Try to detect data type (this might need an upgrade later)
-                        let file_data = self.detect_data_type(&binary_data);
-                        let file_name = path.file_stem()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("imported_file")
-                            .to_string();
-                        
-                        self.push(file_name, Some(file_data), Some(parent_inode), false);
-                        println!("Successfully imported file from QR: {}", path.display());
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to decode QR {}: {}", path.display(), e);
+        // Lowkey unnecessary step, but keeping for clarity
+        // let metadata_json = serde_json::to_string(&metadata)?;
+        // println!("Metadata size: {} bytes", metadata_json.len());
+        
+        // let qr_path = format!("{}/directory.png", output_dir);
+        // self.binary_to_qr(metadata_json.as_bytes(), &qr_path)?;
+        // println!("Created directory QR: {}", qr_path);
+        
+        // later the implementation will change to support a directory that needs multiple blocks
+        let mut current_block = 1; // Start from 1 (0 is directory)
+        
+        for file_entry in &mut metadata.files {
+            if let Some(file) = self.files.values().find(|f| f.name == file_entry.name) {
+                if let Some(file_data) = &file.data {
+                    let data_bytes = file_data.as_bytes();
+                    let data_chunks = self.split_data_for_qr(&data_bytes);
+                    
+                    println!("Exporting file '{}' as {} QR blocks...", file_entry.name, data_chunks.len());
+                    
+                    for chunk in data_chunks.iter() {
+                        let qr_path = format!("{}/file_{:03}.png", output_dir, current_block);
+                        self.binary_to_qr(chunk, &qr_path)?;
+                        file_entry.qr_blocks.push(current_block);
+                        current_block += 1;
                     }
                 }
             }
         }
+        
+        let updated_metadata_json = serde_json::to_string(&metadata)?;
+        let qr_path = format!("{}/directory.png", output_dir);
+        self.binary_to_qr(updated_metadata_json.as_bytes(), &qr_path)?;
+        println!("Updated directory QR with block assignments");
+        
+        println!("Export completed! Total files: {}, Total QR blocks: {}", 
+                 metadata.files.len(), current_block);
         Ok(())
     }
     
-    // Detect data type and create appropriate FileData (for now, only binary and the extension is used to determine type automatically)
-    fn detect_data_type(&self, data: &[u8]) -> FileData {
-        // // Try to parse as UTF-8 text
+    pub fn import_files_from_qr(&mut self, input_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
+        println!("Importing from QR codes in: {}", input_dir);
+        
+        // Read directory QR (later it could be multiple blocks)
+        let dir_qr_path = format!("{}/directory.png", input_dir);
+        println!("Reading directory QR: {}", dir_qr_path);
+        
+        let metadata_bytes = self.qr_to_binary(&dir_qr_path)?;
+        let metadata: FilesystemMetadata = serde_json::from_slice(&metadata_bytes)
+            .map_err(|e| format!("Failed to parse metadata: {}", e))?;
+        
+        println!("Found {} files in directory", metadata.files.len());
+        
+        //  Clear existing files and reset counter
+        self.files.clear();
+        INODE_COUNTER.store(2, Ordering::Relaxed); // Reset to 2 (root is 1)
+        
+        for file_entry in &metadata.files {
+            if !file_entry.qr_blocks.is_empty() {
+                let mut file_data = Vec::new();
+                
+                for &block_num in &file_entry.qr_blocks {
+                    // if directory takes multiple blocks, it can be handled as block_num + offset (amount of directory blocks)
+                    let qr_path = format!("{}/file_{:03}.png", input_dir, block_num);
+                    if let Ok(chunk_data) = self.qr_to_binary(&qr_path) {
+                        file_data.extend_from_slice(&chunk_data);
+                    } else {
+                        eprintln!("Failed to decode data block {}", block_num);
+                    }
+                }
+                
+                let file_data_enum = self.detect_data_type(&file_data, &file_entry.name);
+                self.add_file(file_entry.name.clone(), Some(file_data_enum));
+                
+                println!("Imported file: '{}' ({} bytes)", file_entry.name, file_data.len());
+            }
+        }
+        
+        println!("\n=== Final Imported Structure ===");
+        println!("Root (inode 1) contains:");
+        for (inode, file) in &self.files {
+            println!("  - {}: '{}' ({} bytes)", inode, file.name, file.attrs.size);
+        }
+        
+        Ok(())
+    }
+    
+    fn detect_data_type(&self, data: &[u8], filename: &str) -> FileData {
+        // lets just treat all files as binary for simplicity
         // if let Ok(text) = String::from_utf8(data.to_vec()) {
-        //     // Try to parse as JSON
-        //     if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&text) {
-        //         return FileData::Json(json_value);
-        //     }
-        //     return FileData::Text(text);
+        //     FileData::Text(text)
+        // } else {
+            FileData::Binary(data.to_vec())
         // }
-        
-        // If not valid UTF-8, treat as binary
-        FileData::Binary(data.to_vec())
     }
-    
-    // test function
-    pub fn run_comprehensive_tests(&self) -> Result<(), Box<dyn std::error::Error>> {
-        println!("Running comprehensive QR tests...");
-        
-        let text_data = b"Hello, QR World!";
-        println!("Test 1 - Text data: {}", self.test_qr_roundtrip(text_data)?);
-        
-        let binary_data = vec![0x00, 0x01, 0x02, 0x03, 0xFF, 0xFE, 0xFD];
-        println!("Test 2 - Binary data: {}", self.test_qr_roundtrip(&binary_data)?);
-        
-        let json_data = br#"{"name": "test", "value": 42, "active": true}"#;
-        println!("Test 3 - JSON data: {}", self.test_qr_roundtrip(json_data)?);
-        
-        let empty_data = b"";
-        println!("Test 4 - Empty data: {}", self.test_qr_roundtrip(empty_data)?);
-        
-        let large_data = vec![0xAB; 1000]; // 1000 bytes
-        println!("Test 5 - Large data: {}", self.test_qr_roundtrip(&large_data)?);
-        
-        Ok(())
+
+    fn find_file_by_name(&self, name: &str) -> Option<&File> {
+        self.files.values().find(|f| f.name == name)
     }
+
+    // For debugging
+    fn get_file_inodes(&self) -> Vec<u64> {
+        self.files.keys().cloned().collect()
+    }
+
 }
 
 impl Filesystem for QRFileSystem {
     fn getattr(&mut self, _req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
-        match self.files.get(&ino) {
-            Some(file) => {
-                let attr = &file.attrs;
-                let ttl = Duration::from_secs(1);
-                reply.attr(&ttl, attr);
-            },
-            None => reply.error(ENOENT),
+        if ino == self.root_inode {
+            // Root directory attributes
+            let attr = FileAttr {
+                ino: self.root_inode,
+                size: 0,
+                blocks: 0,
+                atime: std::time::SystemTime::now(),
+                mtime: std::time::SystemTime::now(),
+                ctime: std::time::SystemTime::now(),
+                crtime: std::time::SystemTime::now(),
+                kind: FileType::Directory,
+                perm: 0o755,
+                nlink: 0,
+                uid: 0,
+                gid: 0,
+                rdev: 0,
+                flags: 0,
+                blksize: 4096,
+            };
+            let ttl = Duration::from_secs(1);
+            reply.attr(&ttl, &attr);
+        } else if let Some(file) = self.files.get(&ino) {
+            // File attributes
+            let ttl = Duration::from_secs(1);
+            reply.attr(&ttl, &file.attrs);
+        } else {
+            reply.error(ENOENT);
         }
     }
 
-    fn rename(&mut self, _req: &Request, parent: u64, name: &OsStr, newparent: u64, newname: &OsStr, _flags: u32, reply: ReplyEmpty) {
-        let old_name = name.to_str().unwrap().to_string();
-        let new_name = newname.to_str().unwrap().to_string();
-        self.rename(parent, old_name, newparent, new_name);
-        reply.ok();
-    }
-
-    fn rmdir(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
-        let file_name = name.to_str().unwrap().to_string();
-        self.delete_file(parent, file_name);
-        reply.ok();
-    }
-
-    fn read(&mut self, _req: &Request, ino: u64, _fh: u64, _offset: i64, _size: u32, _flags: i32, _lock_owner: Option<u64>, reply: ReplyData) {
-        let file = match self.files.get(&ino) {
-            Some(f) => f,
-            None => {
-                reply.error(ENOENT);
-                return;
-            }
-        };
-
-        if file.attrs.kind == FileType::Directory {
+    fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
+        if parent != self.root_inode {
             reply.error(ENOENT);
             return;
         }
 
-        let data = match &file.data {
-            Some(d) => d.as_bytes(),
-            None => {
-                reply.data(&[]);
-                return;
-            }
-        };
+        let name_str = name.to_str().unwrap();
 
-        reply.data(&data);
+        if let Some(file) = self.find_file_by_name(name_str) {
+            let ttl = Duration::from_secs(1);
+            reply.entry(&ttl, &file.attrs, 0);
+        } else {
+            reply.error(ENOENT);
+        }
     }
 
-    fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        let name_str = name.to_str().unwrap().to_string();
-
-        let parent_file = match self.files.get(&parent) {
-            Some(p) => p,
-            None => {
-                reply.error(ENOENT);
-                return;
+    fn read(&mut self, _req: &Request, ino: u64, _fh: u64, _offset: i64, _size: u32, _flags: i32, _lock_owner: Option<u64>, reply: ReplyData) {
+        if let Some(file) = self.files.get(&ino) {
+            if let Some(data) = &file.data {
+                reply.data(&data.as_bytes());
+            } else {
+                reply.data(&[]);
             }
-        };
+        } else {
+            reply.error(ENOENT);
+        }
+    }
 
-        let mut found_inode: Option<u64> = None;
+    fn readdir(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, mut reply: ReplyDirectory) {
+        if ino != self.root_inode {
+            reply.error(ENOENT);
+            return;
+        }
 
-        for &child_inode in &parent_file.children {
-            if let Some(child) = self.files.get(&child_inode) {
-                if child.name == name_str {
-                    found_inode = Some(child_inode);
+        let entries = vec![
+            (self.root_inode, ".", FileType::Directory),
+            (self.root_inode, "..", FileType::Directory),
+        ];
+
+        let file_entries: Vec<_> = self.files.iter()
+            .map(|(inode, file)| (*inode, file.name.as_str(), FileType::RegularFile))
+            .collect();
+
+        // Add all entries
+        for (i, (inode, name, file_type)) in entries.iter().chain(file_entries.iter()).enumerate() {
+            if i as i64 >= offset {
+                if reply.add(*inode, (i + 1) as i64, *file_type, name) {
                     break;
                 }
             }
         }
 
-        let inode = match found_inode {
-            Some(i) => i,
-            None => {
-                reply.error(ENOENT);
-                return;
-            }
-        };
-
-        let file = self.files.get(&inode).unwrap();
-        let attr = &file.attrs;
-
-        let ttl = Duration::from_secs(1);
-        reply.entry(&ttl, attr, 0);
+        reply.ok();
     }
 
-    fn readdir(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, mut reply: ReplyDirectory) {
-        let dir = match self.files.get(&ino) {
-            Some(f) => f,
-            None => {
-                reply.error(ENOENT);
-                return;
-            }
-        };
+    // Stub implementations for other required methods (just to test read-only FS)
+    fn rename(&mut self, _req: &Request, _parent: u64, _name: &OsStr, _newparent: u64, _newname: &OsStr, _flags: u32, reply: ReplyEmpty) {
+        reply.error(libc::EROFS); // Read-only filesystem
+    }
 
-        if dir.attrs.kind != FileType::Directory {
-            reply.error(ENOENT);
-            return;
-        }
-
-        if offset == 0 {
-            let _ = reply.add(ino, 1, FileType::Directory, ".");
-            let parent = dir.parent.unwrap_or(ino);
-            let _ = reply.add(parent, 2, FileType::Directory, "..");
-        }
-
-        let mut index = offset - 2;
-        if index < 0 { index = 0; }
-
-        let children = &dir.children;
-
-        for (i, &child_inode) in children.iter().enumerate().skip(index as usize) {
-            if let Some(child) = self.files.get(&child_inode) {
-                let next_offset = 3 + i as i64;
-                let _ = reply.add(child.inode, next_offset, child.attrs.kind, child.name.as_str());
-            }
-        }
-
-        reply.ok();
+    fn rmdir(&mut self, _req: &Request, _parent: u64, _name: &OsStr, reply: ReplyEmpty) {
+        reply.error(libc::EROFS); // Read-only filesystem
     }
 }
 
 fn main() {
-    let mut fs = QRFileSystem::new();
-
-    // Create initial file structure with different data types
-    fs.push("/".to_string(), None, None, true);
-    let test_dir = "./qr_test";
-
-    // fs.push("text_file.txt".to_string(), Some(FileData::Text("Hello, World!\n".to_string())), Some(1), false);
-    // fs.push("binary_file.bin".to_string(), Some(FileData::Binary(vec![0x00, 0x01, 0x02, 0x03, 0xFF])), Some(1), false);
+    println!("=== Simplified QR Filesystem Test ===");
     
-    // Run comprehensive tests first
-    println!("=== Running QR Code Tests ===");
-    if let Err(e) = fs.run_comprehensive_tests() {
-        eprintln!("Test failed: {}", e);
+    let mut original_fs = QRFileSystem::new();
+    
+    println!("\n1. Creating test filesystem structure...");
+    
+    original_fs.add_file("readme.txt".to_string(), 
+                     Some(FileData::Text("Welcome to QR Filesystem!\nThis is a test file.".to_string())));
+    
+    original_fs.add_file("note.txt".to_string(), 
+                     Some(FileData::Text("This is a simple note.".to_string())));
+    
+    original_fs.add_file("config.json".to_string(), 
+                     Some(FileData::Text(r#"{"version": "1.0", "author": "QR FS"}"#.to_string())));
+    
+    original_fs.add_file("data.bin".to_string(), 
+                     Some(FileData::Binary(vec![0x00, 0x01, 0x02, 0x03, 0x04, 0x05])));
+
+    println!("\nOriginal structure:");
+    for (inode, file) in &original_fs.files {
+        println!("  {}: '{}' ({} bytes)", inode, file.name, file.attrs.size);
     }
 
-    println!("\n=== Exporting Files as QR Codes ===");
-    if let Err(e) = fs.export_files_as_qr(test_dir) {
-        eprintln!("QR export failed: {}", e);
+    let test_dir = "./qr_test_simple";
+    
+    let _ = fs::remove_dir_all(test_dir);
+
+    println!("\n2. Exporting to QR codes...");
+    if let Err(e) = original_fs.export_files_as_qr(test_dir) {
+        eprintln!("Export failed: {}", e);
+        return;
     }
 
-    println!("\n=== Importing Files from QR Codes ===");
-    if let Err(e) = fs.import_files_from_qr(test_dir, 1) {
-        eprintln!("QR import failed: {}", e);
+    println!("\n3. Importing from QR codes...");
+    let mut imported_fs = QRFileSystem::new();
+    if let Err(e) = imported_fs.import_files_from_qr(test_dir) {
+        eprintln!("Import failed: {}", e);
+        return;
     }
 
+    println!("\n4. Mounting filesystem...");
     let mountpoint = match env::args().nth(1) {
         Some(p) => p,
         None => {
-            println!("Usage: <program> <MOUNTPOINT>");
+            println!("Usage: {} <MOUNTPOINT>", env::args().next().unwrap());
             return;
         }
     };
 
-    println!("\n=== Mounting Filesystem at: {} ===", mountpoint);
-    match fuser::mount2(fs, &mountpoint, &[]) {
-        Ok(_) => println!("Mounted successfully"),
-        Err(e) => println!("ERROR MOUNTING: {:?}", e),
+    println!("Mounting at: {}", mountpoint);
+    match fuser::mount2(imported_fs, &mountpoint, &[]) {
+        Ok(_) => {
+            println!("Mounted successfully!");
+            println!("Try: ls -la {}", mountpoint);
+            println!("Try: cat {}/readme.txt", mountpoint);
+            println!("Try: cat {}/config.json", mountpoint);
+            println!("\nUse 'fusermount -u {}' to unmount", mountpoint);
+        },
+        Err(e) => println!("Mount failed: {:?}", e),
     }
 }
-
-// Note: if you cloned the repository, you have to make a dir to mount the fs out of the repo
-// run with cargo run -- ~/Desktop/fs
-// To unmount, run the command: fusermount -u ~/Desktop/fs
-// if you don't unmount, you'll run into errors next time you try cargo run.
-// TO RUN THE PROGRAM YOU HAVE TO USE OTHER TERMINAL, DO NOT USE THE VS CODE TERMINAL.
