@@ -7,8 +7,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::env;
 use std::time::Duration;
 use std::ffi::OsStr;
-use fuser::{ FileAttr, FileType, Filesystem, Request, ReplyDirectory, ReplyAttr, ReplyData, ReplyEntry, ReplyEmpty, ReplyOpen, ReplyCreate };
+use fuser::{ FileAttr, FileType, Filesystem, Request, ReplyDirectory, ReplyAttr, ReplyData, ReplyEntry, ReplyEmpty, ReplyOpen, ReplyCreate, ReplyWrite };
 use libc::{ENOENT};
+use std::time::SystemTime;
 
 
 static INODE_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -16,24 +17,25 @@ static INODE_COUNTER: AtomicU64 = AtomicU64::new(1);
 struct File {
     pub inode: u64,
     pub name: String,
-    pub data: Option<String>, // It's a String for now
+    pub data: Option<Vec<u8>>,
     pub parent: Option<u64>,
     pub children: Vec<u64>,
     pub attrs: FileAttr,
 }
 
 impl File {
-    pub fn new(file_name: String, file_data: Option<String>, parent_inode: Option<u64>, folder_flag: bool) -> Self {
+    pub fn new(file_name: String, file_data: Option<Vec<u8>>, parent_inode: Option<u64>, folder_flag: bool) -> Self {
 
         let id: u64 = INODE_COUNTER.fetch_add(1, Ordering::Relaxed);
 
+        let size = match &file_data {
+            Some(v) => v.len() as u64,
+            None => 0,
+        };
+
         let attr = FileAttr {
             ino: id,
-            size: if file_data.is_some() {
-                file_data.as_ref().unwrap().len() as u64
-            } else {
-                0
-            },
+            size,
             blocks: 0,
             atime: std::time::SystemTime::now(),
             mtime: std::time::SystemTime::now(),
@@ -76,7 +78,7 @@ impl QRFileSystem { //The root node is always equals one
         }
     }
 
-    pub fn push(&mut self, file_name: String, data: Option<String>, parent_inode: Option<u64>, folder_flag: bool) {
+    pub fn push(&mut self, file_name: String, data: Option<Vec<u8>>, parent_inode: Option<u64>, folder_flag: bool) {
         let file: File = File::new(file_name, data, parent_inode, folder_flag);
         let inode = file.inode;
         self.files.insert(inode, file);
@@ -87,48 +89,6 @@ impl QRFileSystem { //The root node is always equals one
             }
         }
     }
-
-    pub fn pop_recursively(&mut self, inode: u64) {
-
-        if let Some(file) = self.files.get(&inode) {
-            let children = file.children.clone(); 
-                        
-            for child_inode in children {
-                self.pop_recursively(child_inode);
-            }
-        }
-
-        self.files.remove(&inode);
-    }
-
-    pub fn delete_file(&mut self, parent_inode: u64, file_name: String) {
-
-        let mut target_inode: Option<u64> = None;
-
-        if let Some(parent_file) = self.files.get(&parent_inode) {
-            for &child_inode in &parent_file.children {
-                if let Some(child) = self.files.get(&child_inode) {
-                    if child.name == file_name {
-                        target_inode = Some(child_inode);
-                        break;
-                    }
-                }
-            }
-        }
-
-        let target_inode = match target_inode {
-            Some(i) => i,
-            None => return,
-        };
-
-        if let Some(parent_file) = self.files.get_mut(&parent_inode) {
-            parent_file.children.retain(|&x| x != target_inode);
-        }
-
-        self.pop_recursively(target_inode);
-    }
-
-
 
     pub fn rename(&mut self, old_parent_inode: u64, file_old_name: String, new_parent_inode: u64, file_new_name: String,) {
 
@@ -190,9 +150,37 @@ impl Filesystem for QRFileSystem {
     }
 
 
-    // fn write(&mut self, _req: &Request, ino: u64, fh: u64, offset: i64, data: &[u8], write_flags: u32, flags: i32, lock_owner: Option<u64>, reply: ReplyWrite) {
+    fn write(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, data: &[u8], _write_flags: u32, _flags: i32, _lock_owner: Option<u64>, reply: ReplyWrite) {
+        let file: &mut File = match self.files.get_mut(&ino) {
+            Some(f) => f,
+            None => {
+                reply.error(ENOENT);
+                return ;
+            }
+        };
 
-    // }
+        if file.attrs.kind == FileType::Directory {
+            reply.error(ENOENT);
+            return ;
+        }
+
+        if file.data.is_none() {
+            file.data = Some(Vec::new());
+        }
+
+        let buffer = file.data.as_mut().unwrap();
+        let offset = offset as usize;
+        let required_size = offset + data.len();
+
+        if buffer.len() < required_size {
+            buffer.resize(required_size, 0);
+        }
+
+        buffer[offset..offset + data.len()].copy_from_slice(data);
+        file.attrs.size = buffer.len() as u64;
+        reply.written(data.len() as u32);
+
+    }
 
 
     // fn statfs(&mut self, _req: &Request, _ino: u64, reply: ReplyStatfs) {
@@ -253,22 +241,137 @@ impl Filesystem for QRFileSystem {
     }
 
 
-    fn open(&mut self, _req: &Request, ino: u64, _flags: i32, reply: ReplyOpen) {
+    fn open(&mut self, _req: &Request, ino: u64, flags: i32, reply: ReplyOpen) {
+
+        let file = match self.files.get(&ino) {
+            Some(f) => f,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let write_mode = flags & (libc::O_WRONLY | libc::O_RDWR) != 0;
+        if file.attrs.kind == FileType::Directory && write_mode {
+            reply.error(libc::EISDIR);
+            return;
+        }
+
         println!("open called for ino={}", ino);
-        reply.opened(0, 0);
+        let fh = ino;
+        reply.opened(fh, 0);
     }
 
 
-    fn mkdir(&mut self, _req: &Request, parent: u64, name: &OsStr, _mode: u32, _umask: u32, _reply: ReplyEntry) { // we have to add the child to the parent
-        let file_name = name.to_str().unwrap().to_string();
-        self.push(file_name, None, Some(parent), true);
-        // reply.ok();
-        return ;
+    fn setattr(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        mode: Option<u32>,
+        _uid: Option<u32>,
+        _gid: Option<u32>,
+        size: Option<u64>,
+        _atime: Option<fuser::TimeOrNow>,
+        _mtime: Option<fuser::TimeOrNow>,
+        _ctime: Option<SystemTime>,
+        _fh: Option<u64>,
+        _crtime: Option<SystemTime>,
+        _chgtime: Option<SystemTime>,
+        _bkuptime: Option<SystemTime>,
+        _flags: Option<u32>,
+        reply: ReplyAttr,
+    ) {
+        let file = match self.files.get_mut(&ino) {
+            Some(f) => f,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        // Cambiar permisos si se solicitaron
+        if let Some(m) = mode {
+            file.attrs.perm = (m & 0o777) as u16;
+        }
+
+        if let Some(sz) = size {
+            if let Some(data) = file.data.as_mut() {
+                data.resize(sz as usize, 0);
+            }
+            file.attrs.size = sz;
+        }
+
+        reply.attr(&Duration::new(1, 0), &file.attrs);
     }
 
-    fn rmdir(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) { // we have to delete the child from the parent
-        let file_name = name.to_str().unwrap().to_string();
-        self.delete_file(parent, file_name);
+
+    fn mkdir(&mut self, _req: &Request, parent: u64, name: &OsStr, _mode: u32, _umask: u32, reply: ReplyEntry) { 
+        let file_name = match name.to_str() {
+            Some(n) => n,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+        self.push(file_name.to_string(), None, Some(parent), true);
+        let actual_inode = INODE_COUNTER.load(Ordering::Relaxed) - 1;
+        let file = self.files.get(&actual_inode).unwrap();
+
+        reply.entry(&Duration::new(1, 0), &file.attrs, 0);
+    }
+
+    fn rmdir(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+
+        let name = match name.to_str() {
+            Some(n) => n,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let children = match self.files.get(&parent) {
+            Some(f) => f.children.clone(),
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let mut target_inode: Option<u64> = None;
+
+        for child_inode in children {
+            if let Some(child) = self.files.get(&child_inode) {
+                if child.name == name {
+                    if child.attrs.kind != FileType::Directory {
+                        reply.error(libc::ENOTDIR);
+                        return;
+                    }
+
+                    if !child.children.is_empty() {
+                        reply.error(libc::ENOTEMPTY);
+                        return;
+                    }
+
+                    target_inode = Some(child_inode);
+                    break;
+                }
+            }
+        }
+
+        let target_inode = match target_inode {
+            Some(i) => i,
+            None => {
+                reply.error(ENOENT);
+                return ;
+            }
+        };
+
+        if let Some(parent_file) = self.files.get_mut(&parent) {
+            parent_file.children.retain(|&x| x != target_inode);
+        }
+
+        self.files.remove(&target_inode);
         reply.ok();
     }
 
@@ -301,9 +404,7 @@ impl Filesystem for QRFileSystem {
             }
         };
 
-        // println!("{}", data);
-
-        reply.data(data.as_bytes()); // If data wasn't a string, you have to apply pretty() and to_string() before apply as_bytes()
+        reply.data(&data);
     }
 
 
@@ -391,9 +492,10 @@ fn main() {
     let mut fs = QRFileSystem::new();
 
     fs.push("/".to_string(), None, None, true);
-    fs.push("pingapeta".to_string(), Some("Contenido A".to_string()), Some(1), true);
-    fs.push("fileB.txt".to_string(), Some("Contenido B".to_string()), Some(1), false);
-    fs.push("fileC.txt".to_string(), Some("Contenido C".to_string()), Some(1), false);
+    fs.push("pingapeta".to_string(), None, Some(1), true);
+    fs.push("fileB.txt".to_string(), Some(b"Contenido B".to_vec()), Some(1), false);
+    fs.push("fileC.txt".to_string(), Some(b"Contenido C".to_vec()), Some(1), false);
+
 
 
     let mountpoint = match env::args().nth(1) {
