@@ -13,7 +13,6 @@ use std::io;
 
 static INODE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-// Support different data types (Josh might need to cook here)
 #[derive(Clone)]
 enum FileData {
     Text(String),
@@ -221,14 +220,16 @@ impl QRFileSystem {
     pub fn export_files_as_qr(&self, output_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
         fs::create_dir_all(output_dir)?;
         
+        // the idea is that each QR is a block of data representing a file or part of it (if too large)
+        // the first QRs will be the directory file of the FileSystem, indicating structure such as name (begin block (QR) and end block (QR))
+        // after some mark (the end of the directory files), the files will be stored as QRs
+        let mut index : u32 = 1;
         for (_inode, file) in &self.files {
             if file.attrs.kind == FileType::RegularFile {
                 if let Some(content) = &file.data {
                     let binary_data = content.as_bytes();
-                    let sanitized_name = file.name.replace("/", "_").replace("..", "_"); // Simple sanitization to avoid path traversal
-                    // let qr_path = format!("{}/file_{}_{}.png", output_dir, _inode, sanitized_name);
-                    let qr_path = format!("{}/{}.png", output_dir, sanitized_name);
-                    
+                    let qr_path = format!("{}/file_{}.png", output_dir, index);
+                    index += 1;
                     self.binary_to_qr(&binary_data, &qr_path)?;
                     println!("Exported '{}' as QR code: {}", file.name, qr_path);
                 }
@@ -240,6 +241,9 @@ impl QRFileSystem {
     pub fn import_files_from_qr(&mut self, input_dir: &str, parent_inode: u64) -> Result<(), Box<dyn std::error::Error>> {
         let entries = fs::read_dir(input_dir)?;
         
+        // the first QRs will be the directory file of the FileSystem, that will be used to reconstruct structure
+        // after some mark (the end of the directory files), the next QRs will be the files to import following the structure suggested by the directory files
+
         for entry in entries {
             let entry = entry?;
             let path = entry.path();
@@ -266,16 +270,16 @@ impl QRFileSystem {
         Ok(())
     }
     
-    // Detect data type and create appropriate FileData (Josh might need to cook here)
+    // Detect data type and create appropriate FileData (for now, only binary and the extension is used to determine type automatically)
     fn detect_data_type(&self, data: &[u8]) -> FileData {
-        // Try to parse as UTF-8 text
-        if let Ok(text) = String::from_utf8(data.to_vec()) {
-            // Try to parse as JSON
-            if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&text) {
-                return FileData::Json(json_value);
-            }
-            return FileData::Text(text);
-        }
+        // // Try to parse as UTF-8 text
+        // if let Ok(text) = String::from_utf8(data.to_vec()) {
+        //     // Try to parse as JSON
+        //     if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&text) {
+        //         return FileData::Json(json_value);
+        //     }
+        //     return FileData::Text(text);
+        // }
         
         // If not valid UTF-8, treat as binary
         FileData::Binary(data.to_vec())
@@ -437,16 +441,16 @@ fn main() {
     // fs.push("text_file.txt".to_string(), Some(FileData::Text("Hello, World!\n".to_string())), Some(1), false);
     // fs.push("binary_file.bin".to_string(), Some(FileData::Binary(vec![0x00, 0x01, 0x02, 0x03, 0xFF])), Some(1), false);
     
-    // // Run comprehensive tests first
-    // println!("=== Running QR Code Tests ===");
-    // if let Err(e) = fs.run_comprehensive_tests() {
-    //     eprintln!("Test failed: {}", e);
-    // }
+    // Run comprehensive tests first
+    println!("=== Running QR Code Tests ===");
+    if let Err(e) = fs.run_comprehensive_tests() {
+        eprintln!("Test failed: {}", e);
+    }
 
-    // println!("\n=== Exporting Files as QR Codes ===");
-    // if let Err(e) = fs.export_files_as_qr(test_dir) {
-    //     eprintln!("QR export failed: {}", e);
-    // }
+    println!("\n=== Exporting Files as QR Codes ===");
+    if let Err(e) = fs.export_files_as_qr(test_dir) {
+        eprintln!("QR export failed: {}", e);
+    }
 
     println!("\n=== Importing Files from QR Codes ===");
     if let Err(e) = fs.import_files_from_qr(test_dir, 1) {
