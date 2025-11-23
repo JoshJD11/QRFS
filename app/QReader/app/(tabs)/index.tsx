@@ -1,80 +1,65 @@
 import { Image } from 'expo-image';
-import { Platform, StyleSheet } from 'react-native';
+import { View, StyleSheet } from 'react-native';
 
-import { HelloWave } from '@/components/hello-wave';
+import { AnimatedCamera } from '@/components/animated-camera';
 import ParallaxScrollView from '@/components/parallax-scroll-view';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
-import { Link } from 'expo-router';
 
 export default function HomeScreen() {
   return (
     <ParallaxScrollView
-      headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}
+      headerBackgroundColor={{ light: '#002855e6', dark: '#002855ff' }}
       headerImage={
-        <Image
-          source={require('@/assets/images/partial-react-logo.png')}
-          style={styles.reactLogo}
-        />
+        <View style={{ alignItems: 'center' }}><Image
+          source={{ uri: 'https://www.tec.ac.cr/themes/custom/tecnologico/logo.svg'}} // rometo official TEC logo
+          style={{
+            width: 300,
+            height: 275,
+          }}
+        /></View>
       }>
       <ThemedView style={styles.titleContainer}>
-        <ThemedText type="title">Welcome!</ThemedText>
-        <HelloWave />
+        <ThemedText type="title">QRFS Code Scanner</ThemedText>
+        <AnimatedCamera />
       </ThemedView>
       <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 1: Try it</ThemedText>
+        <ThemedText type="subtitle">Step 1: Prepare the codes</ThemedText>
         <ThemedText>
-          Edit <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> to see changes.
-          Press{' '}
+          Have the{' '}
           <ThemedText type="defaultSemiBold">
-            {Platform.select({
-              ios: 'cmd + d',
-              android: 'cmd + m',
-              web: 'F12',
-            })}
-          </ThemedText>{' '}
-          to open developer tools.
+            QR codes
+          </ThemedText>
+          {' '}ready and accessible before starting the scanning process.
         </ThemedText>
       </ThemedView>
       <ThemedView style={styles.stepContainer}>
-        <Link href="/modal">
-          <Link.Trigger>
-            <ThemedText type="subtitle">Step 2: Explore</ThemedText>
-          </Link.Trigger>
-          <Link.Preview />
-          <Link.Menu>
-            <Link.MenuAction title="Action" icon="cube" onPress={() => alert('Action pressed')} />
-            <Link.MenuAction
-              title="Share"
-              icon="square.and.arrow.up"
-              onPress={() => alert('Share pressed')}
-            />
-            <Link.Menu title="More" icon="ellipsis">
-              <Link.MenuAction
-                title="Delete"
-                icon="trash"
-                destructive
-                onPress={() => alert('Delete pressed')}
-              />
-            </Link.Menu>
-          </Link.Menu>
-        </Link>
-
+        <ThemedText type="subtitle">Step 2: Grant permission</ThemedText>
         <ThemedText>
-          {`Tap the Explore tab to learn more about what's included in this starter app.`}
+          Navigate to the{' '}
+          <ThemedText type="defaultSemiBold">
+            scanning page
+          </ThemedText>
+          {' '}and allow the app to access your device’s camera.
         </ThemedText>
       </ThemedView>
       <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 3: Get a fresh start</ThemedText>
+        <ThemedText type="subtitle">Step 3: Scan</ThemedText>
         <ThemedText>
-          {`When you're ready, run `}
-          <ThemedText type="defaultSemiBold">npm run reset-project</ThemedText> to get a fresh{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> directory. This will move the current{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> to{' '}
-          <ThemedText type="defaultSemiBold">app-example</ThemedText>.
+          Tap the{' '}
+          <ThemedText type="defaultSemiBold">
+            Scan Code
+          </ThemedText>
+          {' '}button to begin scanning the QR codes.
         </ThemedText>
       </ThemedView>
+      <View style={{ paddingVertical: 16, alignItems: 'center' }}>
+        <ThemedText type="default" style={{ textAlign: 'center', opacity: 0.5 }}>
+          App made by:{"\n"}JoshJD11 - K-lobiTo - Sebco27
+        </ThemedText>
+      </View>
     </ParallaxScrollView>
+    
   );
 }
 
@@ -87,12 +72,5 @@ const styles = StyleSheet.create({
   stepContainer: {
     gap: 8,
     marginBottom: 8,
-  },
-  reactLogo: {
-    height: 178,
-    width: 290,
-    bottom: 0,
-    left: 0,
-    position: 'absolute',
-  },
+  }
 });
