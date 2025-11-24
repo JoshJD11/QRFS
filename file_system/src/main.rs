@@ -1,3 +1,6 @@
+mod server;
+// mod builder; // a Mystery Mouseketool :P
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::env;
@@ -427,7 +430,8 @@ impl Filesystem for QRFileSystem {
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let mut fs = QRFileSystem::new();
 
     // Create initial file structure with different data types
@@ -466,6 +470,8 @@ fn main() {
         Ok(_) => println!("Mounted successfully"),
         Err(e) => println!("ERROR MOUNTING: {:?}", e),
     }
+
+    server::run_server().await;
 }
 
 // Note: if you cloned the repository, you have to make a dir to mount the fs out of the repo

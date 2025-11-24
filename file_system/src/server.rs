@@ -2,7 +2,7 @@ use axum::{routing::post, Json, Router};
 use serde::Deserialize;
 use std::net::SocketAddr;
 
-use crate::builder::construir_imagen;
+// use crate::builder::construir_imagen;
 
 #[derive(Deserialize)]
 pub struct ImagePayload {
