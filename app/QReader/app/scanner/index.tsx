@@ -1,7 +1,6 @@
 import { CameraView } from "expo-camera";
 import { Stack } from "expo-router";
-import { useState, useEffect } from "react";
-import { Image } from 'expo-image';
+import { useState } from "react";
 import {
     Platform,
     SafeAreaView,
@@ -10,43 +9,24 @@ import {
     Alert,
 } from "react-native";
 
-type ChunkMap = { [id: number]: string };
-
 export default function Home() {
     const [scanned, setScanned] = useState(false);
-    const [indexScanned, setIndexScanned] = useState(false);
-    const [imageBase64, setImageBase64] = useState<string | null>(null);
-    const [mime, setMime] = useState<string | null>(null);
-    const [base64len, setBase64len] = useState<number | null>(null);
-    const [chunks, setChunks] = useState<ChunkMap>({});
+    const SERVER_URL = "http://192.168.0.3:3000/upload-data";
 
-    // join QR data
-    useEffect(() => {
-        if (base64len === null) return;
-
-        const ids = Object.keys(chunks).map(Number);
-        if (ids.length !== base64len) return;
-
-        ids.sort((a, b) => a - b);
-        const dataCombined = ids.map((id) => chunks[id]).join("");
-
-        setImageBase64(dataCombined);
-
-        setScanned(true); // stop scanning
-    }, [chunks, base64len]);
+    async function uploadRawData(rawData : string) {
+        console.log(rawData);
+        await fetch(SERVER_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ data: rawData }),
+        });
+    }
 
     return (
         <SafeAreaView style={StyleSheet.absoluteFillObject}>
             <Stack.Screen options={{ headerShown: false }} />
             {Platform.OS === "android" ? <StatusBar hidden /> : null}
-            {imageBase64 && mime && (
-                <Image source={{ uri: `data:${mime};base64,${imageBase64}`}}
-                       style={{
-                           width: 300,
-                           height: 275,
-                           resizeMode: "contain",
-                       }} />
-            )}
+
             {!scanned && (
                 <CameraView
                     style={{
@@ -58,65 +38,21 @@ export default function Home() {
                     }}
                     facing="back"
                     onBarcodeScanned={({ data }) => {
-
-                        setScanned(true); // locks camera while process the QR
-
-                        if (!indexScanned) {
-                            try {
-                                const json = JSON.parse(data);
-
-                                if (json.type === "image-base64") {
-                                    setMime(json.mime);
-                                    setBase64len(json.len);
-                                    setIndexScanned(true);
-
-                                    Alert.alert(
-                                        "QR SCANNED",
-                                        "Index QR scanned successfully",
-                                        [
-                                            {
-                                                text: "OK",
-                                                onPress: () => {
-                                                    setScanned(false);
-                                                },
-                                            },
-                                        ]
-                                    );
-                                } else {
-                                    setScanned(false);
-                                }
-                            } catch (e) {
-                                console.warn("QR inválido:", e);
-                                setScanned(false);
-                            }
-                        } else { // now we scan the QR with data
-                            try {
-                                const json = JSON.parse(data);
-
-                                const isValid =
-                                    base64len !== null &&
-                                    json.id > 0 &&
-                                    json.id <= base64len &&
-                                    !(json.id in chunks);
-
-                                if (isValid) {
-                                    setChunks((prev) => ({
-                                        ...prev,
-                                        [json.id]: json.data,
-                                    }));
-
-                                    Alert.alert(
-                                        "QR SCANNED",
-                                        `QR ${json.id} scanned successfully`,
-                                        [ { text: "OK" } ]
-                                    );
-                                }
-                            } catch (e) {
-                                console.warn("QR inválido:", e);
-                            } finally {
-                                setScanned(false);
-                            }
-                        }
+                        // locks camera while process the QR
+                        setScanned(true);
+                        uploadRawData(data);
+                        Alert.alert(
+                            "QR SCANNED",
+                            "QR scanned successfully",
+                            [
+                                {
+                                    text: "OK",
+                                    onPress: () => {
+                                        setScanned(false);
+                                    },
+                                },
+                            ]
+                        );
                     }}
                 />
             )}

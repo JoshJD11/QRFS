@@ -1,5 +1,5 @@
 mod server;
-// mod builder; // a Mystery Mouseketool :P
+mod builder;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -451,7 +451,7 @@ async fn main() {
     // if let Err(e) = fs.export_files_as_qr(test_dir) {
     //     eprintln!("QR export failed: {}", e);
     // }
-
+/*
     println!("\n=== Importing Files from QR Codes ===");
     if let Err(e) = fs.import_files_from_qr(test_dir, 1) {
         eprintln!("QR import failed: {}", e);
@@ -470,7 +470,7 @@ async fn main() {
         Ok(_) => println!("Mounted successfully"),
         Err(e) => println!("ERROR MOUNTING: {:?}", e),
     }
-
+*/
     server::run_server().await;
 }
 
