@@ -35,9 +35,17 @@ impl FileData {
 
 // Simplified: Only store file names and their QR block assignments, we could add FileAttrs to FileEntry if needed (later)
 #[derive(Serialize, Deserialize, Debug)]
-struct FilesystemMetadata {
+pub struct FilesystemMetadata {
     pub version: u32,
     pub files: Vec<FileEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub passphrase_hash: Option<String>, // Store hash for verification
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ExportConfig {
+    pub passphrase: String,
+    pub compression: bool, // Optional: for future use
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -157,35 +165,50 @@ impl QRFileSystem {
         chunks
     }
     
-    pub fn export_files_as_qr(&self, output_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn export_files_as_qr(&self, output_dir: &str, passphrase: &str) -> Result<(), Box<dyn std::error::Error>> {
         fs::create_dir_all(output_dir)?;
         
-        println!("Exporting filesystem structure...");
+        println!("Exporting filesystem structure with passphrase protection...");
         
         let mut metadata = FilesystemMetadata {
             version: 1,
             files: Vec::new(),
+            passphrase_hash: Some(self.hash_passphrase(passphrase)),
         };
         
         for (_inode, file) in &self.files {
+            let chunk_count = if let Some(file_data) = &file.data {
+                let data_bytes = file_data.as_bytes();
+                let data_chunks = self.split_data_for_qr(&data_bytes);
+                data_chunks.len()
+            } else {
+                0
+            };
+            
             let entry = FileEntry {
                 name: file.name.clone(),
-                qr_blocks: Vec::new(), // Will be filled when we export data
+                qr_blocks: vec![0; chunk_count],
             };
             metadata.files.push(entry);
-            println!("  - {}", file.name);
+            println!("  - {} ({} chunks)", file.name, chunk_count);
         }
         
-        // Lowkey unnecessary step, but keeping for clarity
-        // let metadata_json = serde_json::to_string(&metadata)?;
-        // println!("Metadata size: {} bytes", metadata_json.len());
+        let mut current_block = 0;
         
-        // let qr_path = format!("{}/directory.png", output_dir);
-        // self.binary_to_qr(metadata_json.as_bytes(), &qr_path)?;
-        // println!("Created directory QR: {}", qr_path);
+        let metadata_json = serde_json::to_string(&metadata)?;
+        println!("Initial metadata size: {} bytes", metadata_json.len());
         
-        // later the implementation will change to support a directory that needs multiple blocks
-        let mut current_block = 1; // Start from 1 (0 is directory)
+        let metadata_chunks = self.split_data_for_qr(metadata_json.as_bytes());
+        println!("Directory metadata requires {} QR blocks", metadata_chunks.len());
+        
+        for (chunk_index, chunk) in metadata_chunks.iter().enumerate() {
+            let qr_path = format!("{}/file_{:03}.png", output_dir, current_block);
+            self.binary_to_qr(chunk, &qr_path)?;
+            println!("  Created directory block {}: {}", chunk_index, qr_path);
+            current_block += 1;
+        }
+        
+        let directory_blocks_count = metadata_chunks.len() as u32;
         
         for file_entry in &mut metadata.files {
             if let Some(file) = self.files.values().find(|f| f.name == file_entry.name) {
@@ -195,69 +218,163 @@ impl QRFileSystem {
                     
                     println!("Exporting file '{}' as {} QR blocks...", file_entry.name, data_chunks.len());
                     
-                    for chunk in data_chunks.iter() {
+                    for (chunk_index, chunk) in data_chunks.iter().enumerate() {
                         let qr_path = format!("{}/file_{:03}.png", output_dir, current_block);
                         self.binary_to_qr(chunk, &qr_path)?;
-                        file_entry.qr_blocks.push(current_block);
+                        file_entry.qr_blocks[chunk_index] = current_block;
+                        println!("  Created file block {}: {}", current_block, qr_path);
                         current_block += 1;
                     }
                 }
             }
         }
         
-        let updated_metadata_json = serde_json::to_string(&metadata)?;
-        let qr_path = format!("{}/directory.png", output_dir);
-        self.binary_to_qr(updated_metadata_json.as_bytes(), &qr_path)?;
-        println!("Updated directory QR with block assignments");
+        let final_metadata_json = serde_json::to_string(&metadata)?;
+        
+        let mut final_metadata_with_passphrase = final_metadata_json.clone();
+        final_metadata_with_passphrase.push_str(&format!("|PASSPHRASE:{}", passphrase));
+        
+        let final_metadata_chunks = self.split_data_for_qr(final_metadata_with_passphrase.as_bytes());
+        
+        for (chunk_index, chunk) in final_metadata_chunks.iter().enumerate() {
+            if chunk_index < directory_blocks_count as usize {
+                let qr_path = format!("{}/file_{:03}.png", output_dir, chunk_index as u32);
+                self.binary_to_qr(chunk, &qr_path)?;
+                println!("  Updated directory block {} with final metadata", chunk_index);
+            } else {
+                let qr_path = format!("{}/file_{:03}.png", output_dir, current_block);
+                self.binary_to_qr(chunk, &qr_path)?;
+                println!("  Added directory block {}: {}", current_block, qr_path);
+                current_block += 1;
+            }
+        }
         
         println!("Export completed! Total files: {}, Total QR blocks: {}", 
-                 metadata.files.len(), current_block);
+                metadata.files.len(), current_block);
+        println!("Passphrase protection enabled. Remember your passphrase: '{}'", passphrase);
+        
         Ok(())
     }
+
+    fn hash_passphrase(&self, passphrase: &str) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        
+        let mut hasher = DefaultHasher::new();
+        passphrase.hash(&mut hasher);
+        format!("{:x}", hasher.finish())
+    }
     
-    pub fn import_files_from_qr(&mut self, input_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn import_files_from_qr(&mut self, input_dir: &str, expected_passphrase: &str) -> Result<(), Box<dyn std::error::Error>> {
         println!("Importing from QR codes in: {}", input_dir);
+        println!("Verifying passphrase...");
         
-        // Read directory QR (later it could be multiple blocks)
-        let dir_qr_path = format!("{}/directory.png", input_dir);
-        println!("Reading directory QR: {}", dir_qr_path);
+        let expected_hash = self.hash_passphrase(expected_passphrase);
         
-        let metadata_bytes = self.qr_to_binary(&dir_qr_path)?;
-        let metadata: FilesystemMetadata = serde_json::from_slice(&metadata_bytes)
-            .map_err(|e| format!("Failed to parse metadata: {}", e))?;
+        let mut directory_blocks = Vec::new();
+        let mut current_block = 0;
+        let mut found_passphrase = false;
+        let mut final_metadata = None;
+        
+        loop {
+            let qr_path = format!("{}/file_{:03}.png", input_dir, current_block);
+            if !std::path::Path::new(&qr_path).exists() {
+                break;
+            }
+            
+            match self.qr_to_binary(&qr_path) {
+                Ok(data) => {
+                    directory_blocks.push(data);
+                    current_block += 1;
+                    
+                    let combined_data: Vec<u8> = directory_blocks.iter().flatten().cloned().collect();
+                    if let Ok(combined_str) = String::from_utf8(combined_data.clone()) {
+                        if let Some(passphrase_pos) = combined_str.find("|PASSPHRASE:") {
+                            // Found the passphrase delimiter!
+                            let metadata_str = &combined_str[..passphrase_pos];
+                            let actual_passphrase = &combined_str[passphrase_pos + "|PASSPHRASE:".len()..];
+                            
+                            if actual_passphrase == expected_passphrase {
+                                println!("✓ Passphrase verified successfully");
+                                found_passphrase = true;
+                                
+                                match serde_json::from_str::<FilesystemMetadata>(metadata_str) {
+                                    Ok(metadata) => {
+                                        if let Some(stored_hash) = &metadata.passphrase_hash {
+                                            if stored_hash == &expected_hash {
+                                                println!("✓ Passphrase hash verified");
+                                            } else {
+                                                eprintln!("⚠ Passphrase hash mismatch (file may be modified)");
+                                            }
+                                        }
+                                        
+                                        final_metadata = Some(metadata);
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        return Err(format!("Failed to parse metadata: {}", e).into());
+                                    }
+                                }
+                            } else {
+                                return Err(format!("Incorrect passphrase. Expected '{}', found '{}'", 
+                                                expected_passphrase, actual_passphrase).into());
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    // If we can't decode, and we haven't found the passphrase yet, it's an error
+                    if !found_passphrase {
+                        return Err(format!("Failed to decode directory block {}: {}", current_block, e).into());
+                    }
+                    break;
+                }
+            }
+            
+            // Safety limit
+            if current_block > 1000 {
+                return Err("Too many directory blocks or corrupted directory".into());
+            }
+        }
+        
+        if !found_passphrase {
+            return Err("Passphrase delimiter not found. Either wrong passphrase or corrupted filesystem.".into());
+        }
+        
+        let metadata = final_metadata.ok_or("Failed to parse filesystem metadata")?;
         
         println!("Found {} files in directory", metadata.files.len());
         
-        //  Clear existing files and reset counter
         self.files.clear();
-        INODE_COUNTER.store(2, Ordering::Relaxed); // Reset to 2 (root is 1)
+        INODE_COUNTER.store(2, Ordering::Relaxed);
         
         for file_entry in &metadata.files {
             if !file_entry.qr_blocks.is_empty() {
                 let mut file_data = Vec::new();
                 
                 for &block_num in &file_entry.qr_blocks {
-                    // if directory takes multiple blocks, it can be handled as block_num + offset (amount of directory blocks)
                     let qr_path = format!("{}/file_{:03}.png", input_dir, block_num);
-                    if let Ok(chunk_data) = self.qr_to_binary(&qr_path) {
-                        file_data.extend_from_slice(&chunk_data);
-                    } else {
-                        eprintln!("Failed to decode data block {}", block_num);
+                    match self.qr_to_binary(&qr_path) {
+                        Ok(chunk_data) => {
+                            file_data.extend_from_slice(&chunk_data);
+                        }
+                        Err(e) => {
+                            return Err(format!("Failed to decode data block {} for '{}': {}", 
+                                            block_num, file_entry.name, e).into());
+                        }
                     }
                 }
                 
                 let file_data_enum = self.detect_data_type(&file_data, &file_entry.name);
                 self.add_file(file_entry.name.clone(), Some(file_data_enum));
                 
-                println!("Imported file: '{}' ({} bytes)", file_entry.name, file_data.len());
+                println!("Imported file: '{}' ({} bytes, {} blocks)", 
+                        file_entry.name, file_data.len(), file_entry.qr_blocks.len());
             }
         }
         
-        println!("\n=== Final Imported Structure ===");
-        println!("Root (inode 1) contains:");
-        for (inode, file) in &self.files {
-            println!("  - {}: '{}' ({} bytes)", inode, file.name, file.attrs.size);
-        }
+        println!("\n=== Import completed successfully ===");
+        println!("Root contains {} files", self.files.len());
         
         Ok(())
     }
@@ -380,20 +497,20 @@ impl Filesystem for QRFileSystem {
 }
 
 fn main() {
-    println!("=== Simplified QR Filesystem Test ===");
+    println!("=== QR Filesystem with Passphrase Protection ===");
     
     let mut original_fs = QRFileSystem::new();
     
     println!("\n1. Creating test filesystem structure...");
     
     original_fs.add_file("readme.txt".to_string(), 
-                     Some(FileData::Text("Welcome to QR Filesystem!\nThis is a test file.".to_string())));
+                     Some(FileData::Text("Welcome to QR Filesystem!\nThis is a passphrase-protected test file.\n\nRemember your passphrase to access this filesystem!".to_string())));
     
     original_fs.add_file("note.txt".to_string(), 
-                     Some(FileData::Text("This is a simple note.".to_string())));
+                     Some(FileData::Text("This is a simple note in a protected filesystem.".to_string())));
     
     original_fs.add_file("config.json".to_string(), 
-                     Some(FileData::Text(r#"{"version": "1.0", "author": "QR FS"}"#.to_string())));
+                     Some(FileData::Text(r#"{"version": "1.0", "author": "QR FS", "protected": true}"#.to_string())));
     
     original_fs.add_file("data.bin".to_string(), 
                      Some(FileData::Binary(vec![0x00, 0x01, 0x02, 0x03, 0x04, 0x05])));
@@ -404,27 +521,50 @@ fn main() {
     }
 
     let test_dir = "./qr_test_simple";
-    
     let _ = fs::remove_dir_all(test_dir);
 
-    println!("\n2. Exporting to QR codes...");
-    if let Err(e) = original_fs.export_files_as_qr(test_dir) {
+    // Get passphrase from command line or use default for testing
+    let passphrase = if let Some(pass) = env::args().nth(1) {
+        pass
+    } else {
+        println!("\nNo passphrase provided via command line.");
+        println!("Using default passphrase: 'test123' for demonstration.");
+        "test123".to_string()
+    };
+
+    println!("\n2. Exporting to QR codes with passphrase...");
+    if let Err(e) = original_fs.export_files_as_qr(test_dir, &passphrase) {
         eprintln!("Export failed: {}", e);
         return;
     }
 
-    println!("\n3. Importing from QR codes...");
+    println!("\n3. Testing import with correct passphrase...");
     let mut imported_fs = QRFileSystem::new();
-    if let Err(e) = imported_fs.import_files_from_qr(test_dir) {
+    if let Err(e) = imported_fs.import_files_from_qr(test_dir, &passphrase) {
         eprintln!("Import failed: {}", e);
         return;
     }
 
-    println!("\n4. Mounting filesystem...");
-    let mountpoint = match env::args().nth(1) {
+    println!("\n4. Testing import with wrong passphrase...");
+    let mut failed_fs = QRFileSystem::new();
+    match failed_fs.import_files_from_qr(test_dir, "wrong_password") {
+        Ok(_) => {
+            eprintln!("ERROR: Import should have failed with wrong passphrase!");
+            return;
+        }
+        Err(e) => {
+            println!("✓ Correctly rejected wrong passphrase: {}", e);
+        }
+    }
+
+    println!("\n5. Mounting filesystem...");
+    let mountpoint = match env::args().nth(2) {
         Some(p) => p,
         None => {
-            println!("Usage: {} <MOUNTPOINT>", env::args().next().unwrap());
+            println!("No mountpoint provided. Skipping mount.");
+            println!("\n=== Test completed successfully! ===");
+            println!("You can manually mount with:");
+            println!("  mount.qrfs {} /path/to/mountpoint -p '{}'", test_dir, passphrase);
             return;
         }
     };
@@ -437,7 +577,11 @@ fn main() {
             println!("Try: cat {}/readme.txt", mountpoint);
             println!("Try: cat {}/config.json", mountpoint);
             println!("\nUse 'fusermount -u {}' to unmount", mountpoint);
+            println!("\n=== Test completed successfully! ===");
         },
-        Err(e) => println!("Mount failed: {:?}", e),
+        Err(e) => {
+            eprintln!("Mount failed: {:?}", e);
+            println!("\nNote: Mount might require root privileges or the mountpoint might not exist.");
+        }
     }
 }
