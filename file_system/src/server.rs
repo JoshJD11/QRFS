@@ -10,12 +10,18 @@ pub struct RawQR {
 }
 
 async fn upload_data(Json(payload): Json<RawQR>) {
-    // TO DO
     build_qr(&payload.data);
 }
 
+async fn finish_scanning() {
+    // Klob must cook here
+    println!("All QR codes were scanned"); // debug
+}
+
 pub async fn run_server() {
-    let app = Router::new().route("/upload-data", post(upload_data));
+    let app = Router::new()
+        .route("/upload-data", post(upload_data))
+        .route("/finish-scanning", post(finish_scanning));
 
     let addr: SocketAddr = "0.0.0.0:3000".parse().unwrap();
     println!("Rust server listening!");
