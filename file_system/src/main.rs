@@ -16,6 +16,8 @@ use std::io;
 
 static INODE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
+static PHONE_TRANSFERS_DIRECTORY: &str = "phone-transfers";
+
 // Support different data types (Josh might need to cook here)
 #[derive(Clone)]
 enum FileData {
@@ -471,6 +473,8 @@ async fn main() {
         Err(e) => println!("ERROR MOUNTING: {:?}", e),
     }
 */
+    // only these two lines are needed for the server and the application to connect correctly.
+    fs::create_dir_all(PHONE_TRANSFERS_DIRECTORY).unwrap();
     server::run_server().await;
 }
 
