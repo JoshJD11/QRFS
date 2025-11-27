@@ -3,69 +3,50 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::env;
 use std::time::Duration;
 use std::ffi::OsStr;
-use fuser::{FileAttr, FileType, Filesystem, Request, ReplyDirectory, ReplyAttr, ReplyData, ReplyEntry, ReplyEmpty};
+use fuser::{FileAttr, FileType, Filesystem, Request, ReplyDirectory, ReplyAttr, ReplyData, ReplyEntry, ReplyEmpty, ReplyOpen, ReplyCreate, ReplyWrite};
 use libc::{ENOENT};
+use std::time::SystemTime;
 use qrcode::QrCode;
 use image::Luma;
 use data_encoding::BASE64;
 use std::fs;
-
-static INODE_COUNTER: AtomicU64 = AtomicU64::new(2); // Start from 2, 1 is reserved for root
-
 use serde::{Serialize, Deserialize};
 
-#[derive(Clone, Serialize, Deserialize)]
-enum FileData {
-    Text(String),
-    Binary(Vec<u8>),
-}
+static INODE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-impl FileData {
-    fn as_bytes(&self) -> Vec<u8> {
-        match self {
-            FileData::Text(s) => s.as_bytes().to_vec(),
-            FileData::Binary(b) => b.clone(),
-        }
-    }
-    
-    fn size(&self) -> u64 {
-        self.as_bytes().len() as u64
-    }
-}
-
-// Simplified: Only store file names and their QR block assignments, we could add FileAttrs to FileEntry if needed (later)
 #[derive(Serialize, Deserialize, Debug)]
 pub struct FilesystemMetadata {
     pub version: u32,
     pub files: Vec<FileEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub passphrase_hash: Option<String>, // Store hash for verification
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct ExportConfig {
-    pub passphrase: String,
-    pub compression: bool, // Optional: for future use
+    pub passphrase_hash: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 struct FileEntry {
     pub name: String,
     pub qr_blocks: Vec<u32>,
+    pub parent: Option<u64>,
+    pub is_directory: bool,
 }
 
 struct File {
     pub inode: u64,
     pub name: String,
-    pub data: Option<FileData>,
+    pub data: Option<Vec<u8>>,
+    pub parent: Option<u64>,
+    pub children: Vec<u64>,
     pub attrs: FileAttr,
 }
 
 impl File {
-    pub fn new(file_name: String, data: Option<FileData>) -> Self {
+    pub fn new(file_name: String, file_data: Option<Vec<u8>>, parent_inode: Option<u64>, folder_flag: bool) -> Self {
         let id: u64 = INODE_COUNTER.fetch_add(1, Ordering::Relaxed);
 
-        let size = data.as_ref().map(|d| d.size()).unwrap_or(0);
+        let size = match &file_data {
+            Some(v) => v.len() as u64,
+            None => 0,
+        };
 
         let attr = FileAttr {
             ino: id,
@@ -75,8 +56,12 @@ impl File {
             mtime: std::time::SystemTime::now(),
             ctime: std::time::SystemTime::now(),
             crtime: std::time::SystemTime::now(),
-            kind: FileType::RegularFile,
-            perm: 0o644,
+            kind: if folder_flag {
+                FileType::Directory
+            } else {
+                FileType::RegularFile
+            },
+            perm: 0o755,
             nlink: 0,
             uid: 0,
             gid: 0,
@@ -85,37 +70,71 @@ impl File {
             blksize: 4096,
         };
 
-        Self {
+        Self{
             inode: id,
             name: file_name,
-            data,
+            data: file_data,
+            parent: parent_inode,
+            children: Vec::new(),
             attrs: attr,
         }
     }
 }
 
 struct QRFileSystem {
-    pub root_inode: u64,
-    pub files: HashMap<u64, File>, // All files (root is separate)
+    pub files: HashMap<u64, File>,
 }
 
 impl QRFileSystem {
     pub fn new() -> Self {
         Self {
-            root_inode: 1,
             files: HashMap::new(),
         }
     }
 
-    pub fn add_file(&mut self, file_name: String, data: Option<FileData>) -> u64 {
-        let file = File::new(file_name, data);
+    pub fn push(&mut self, file_name: String, data: Option<Vec<u8>>, parent_inode: Option<u64>, folder_flag: bool) {
+        let file: File = File::new(file_name, data, parent_inode, folder_flag);
         let inode = file.inode;
         self.files.insert(inode, file);
-        inode
+
+        if let Some(pid) = parent_inode {
+            if let Some(parent) = self.files.get_mut(&pid) {
+                parent.children.push(inode);
+            }
+        }
     }
 
-    pub fn remove_file(&mut self, inode: u64) {
-        self.files.remove(&inode);
+    pub fn rename(&mut self, old_parent_inode: u64, file_old_name: String, new_parent_inode: u64, file_new_name: String,) {
+        let mut found_child_inode: Option<u64> = None;
+
+        if let Some(parent_file) = self.files.get(&old_parent_inode) {
+            for &child_inode in &parent_file.children {
+                if let Some(child) = self.files.get(&child_inode) {
+                    if child.name == file_old_name {
+                        found_child_inode = Some(child_inode);
+                        break;
+                    }
+                }
+            }
+        }
+
+        let child_inode = match found_child_inode {
+            Some(i) => i,
+            None => return, 
+        };
+
+        if let Some(child) = self.files.get_mut(&child_inode) {
+            child.name = file_new_name;
+            child.parent = Some(new_parent_inode);
+        }
+
+        if let Some(parent_file) = self.files.get_mut(&old_parent_inode) {
+            parent_file.children.retain(|&x| x != child_inode);
+        }
+
+        if let Some(new_parent) = self.files.get_mut(&new_parent_inode) {
+            new_parent.children.push(child_inode);
+        }
     }
 
     pub fn binary_to_qr(&self, binary_data: &[u8], output_path: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -164,6 +183,15 @@ impl QRFileSystem {
         
         chunks
     }
+
+    fn hash_passphrase(&self, passphrase: &str) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        
+        let mut hasher = DefaultHasher::new();
+        passphrase.hash(&mut hasher);
+        format!("{:x}", hasher.finish())
+    }
     
     pub fn export_files_as_qr(&self, output_dir: &str, passphrase: &str) -> Result<(), Box<dyn std::error::Error>> {
         fs::create_dir_all(output_dir)?;
@@ -178,8 +206,7 @@ impl QRFileSystem {
         
         for (_inode, file) in &self.files {
             let chunk_count = if let Some(file_data) = &file.data {
-                let data_bytes = file_data.as_bytes();
-                let data_chunks = self.split_data_for_qr(&data_bytes);
+                let data_chunks = self.split_data_for_qr(&file_data);
                 data_chunks.len()
             } else {
                 0
@@ -188,6 +215,8 @@ impl QRFileSystem {
             let entry = FileEntry {
                 name: file.name.clone(),
                 qr_blocks: vec![0; chunk_count],
+                parent: file.parent,
+                is_directory: file.attrs.kind == FileType::Directory,
             };
             metadata.files.push(entry);
             println!("  - {} ({} chunks)", file.name, chunk_count);
@@ -213,8 +242,7 @@ impl QRFileSystem {
         for file_entry in &mut metadata.files {
             if let Some(file) = self.files.values().find(|f| f.name == file_entry.name) {
                 if let Some(file_data) = &file.data {
-                    let data_bytes = file_data.as_bytes();
-                    let data_chunks = self.split_data_for_qr(&data_bytes);
+                    let data_chunks = self.split_data_for_qr(&file_data);
                     
                     println!("Exporting file '{}' as {} QR blocks...", file_entry.name, data_chunks.len());
                     
@@ -255,15 +283,6 @@ impl QRFileSystem {
         
         Ok(())
     }
-
-    fn hash_passphrase(&self, passphrase: &str) -> String {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        
-        let mut hasher = DefaultHasher::new();
-        passphrase.hash(&mut hasher);
-        format!("{:x}", hasher.finish())
-    }
     
     pub fn import_files_from_qr(&mut self, input_dir: &str, expected_passphrase: &str) -> Result<(), Box<dyn std::error::Error>> {
         println!("Importing from QR codes in: {}", input_dir);
@@ -290,21 +309,20 @@ impl QRFileSystem {
                     let combined_data: Vec<u8> = directory_blocks.iter().flatten().cloned().collect();
                     if let Ok(combined_str) = String::from_utf8(combined_data.clone()) {
                         if let Some(passphrase_pos) = combined_str.find("|PASSPHRASE:") {
-                            // Found the passphrase delimiter!
                             let metadata_str = &combined_str[..passphrase_pos];
                             let actual_passphrase = &combined_str[passphrase_pos + "|PASSPHRASE:".len()..];
                             
                             if actual_passphrase == expected_passphrase {
-                                println!("✓ Passphrase verified successfully");
+                                println!("Passphrase verified successfully");
                                 found_passphrase = true;
                                 
                                 match serde_json::from_str::<FilesystemMetadata>(metadata_str) {
                                     Ok(metadata) => {
                                         if let Some(stored_hash) = &metadata.passphrase_hash {
                                             if stored_hash == &expected_hash {
-                                                println!("✓ Passphrase hash verified");
+                                                println!("Passphrase hash verified");
                                             } else {
-                                                eprintln!("⚠ Passphrase hash mismatch (file may be modified)");
+                                                eprintln!("Passphrase hash mismatch (file may be modified)");
                                             }
                                         }
                                         
@@ -323,7 +341,6 @@ impl QRFileSystem {
                     }
                 }
                 Err(e) => {
-                    // If we can't decode, and we haven't found the passphrase yet, it's an error
                     if !found_passphrase {
                         return Err(format!("Failed to decode directory block {}: {}", current_block, e).into());
                     }
@@ -331,7 +348,6 @@ impl QRFileSystem {
                 }
             }
             
-            // Safety limit
             if current_block > 1000 {
                 return Err("Too many directory blocks or corrupted directory".into());
             }
@@ -346,10 +362,16 @@ impl QRFileSystem {
         println!("Found {} files in directory", metadata.files.len());
         
         self.files.clear();
-        INODE_COUNTER.store(2, Ordering::Relaxed);
+        INODE_COUNTER.store(1, Ordering::Relaxed);
         
         for file_entry in &metadata.files {
-            if !file_entry.qr_blocks.is_empty() {
+            if file_entry.is_directory {
+                self.push(file_entry.name.clone(), None, file_entry.parent, true);
+            }
+        }
+        
+        for file_entry in &metadata.files {
+            if !file_entry.is_directory && !file_entry.qr_blocks.is_empty() {
                 let mut file_data = Vec::new();
                 
                 for &block_num in &file_entry.qr_blocks {
@@ -365,223 +387,400 @@ impl QRFileSystem {
                     }
                 }
                 
-                let file_data_enum = self.detect_data_type(&file_data, &file_entry.name);
-                self.add_file(file_entry.name.clone(), Some(file_data_enum));
+                self.push(file_entry.name.clone(), Some(file_data), file_entry.parent, false);
                 
-                println!("Imported file: '{}' ({} bytes, {} blocks)", 
-                        file_entry.name, file_data.len(), file_entry.qr_blocks.len());
+                println!("Imported file: '{}' ({} blocks)", 
+                        file_entry.name, file_entry.qr_blocks.len());
             }
         }
         
         println!("\n=== Import completed successfully ===");
-        println!("Root contains {} files", self.files.len());
+        println!("Root contains {} files and directories", self.files.len());
         
         Ok(())
     }
-    
-    fn detect_data_type(&self, data: &[u8], filename: &str) -> FileData {
-        // lets just treat all files as binary for simplicity
-        // if let Ok(text) = String::from_utf8(data.to_vec()) {
-        //     FileData::Text(text)
-        // } else {
-            FileData::Binary(data.to_vec())
-        // }
-    }
-
-    fn find_file_by_name(&self, name: &str) -> Option<&File> {
-        self.files.values().find(|f| f.name == name)
-    }
-
-    // For debugging
-    fn get_file_inodes(&self) -> Vec<u64> {
-        self.files.keys().cloned().collect()
-    }
-
 }
 
 impl Filesystem for QRFileSystem {
     fn getattr(&mut self, _req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
-        if ino == self.root_inode {
-            // Root directory attributes
-            let attr = FileAttr {
-                ino: self.root_inode,
-                size: 0,
-                blocks: 0,
-                atime: std::time::SystemTime::now(),
-                mtime: std::time::SystemTime::now(),
-                ctime: std::time::SystemTime::now(),
-                crtime: std::time::SystemTime::now(),
-                kind: FileType::Directory,
-                perm: 0o755,
-                nlink: 0,
-                uid: 0,
-                gid: 0,
-                rdev: 0,
-                flags: 0,
-                blksize: 4096,
-            };
-            let ttl = Duration::from_secs(1);
-            reply.attr(&ttl, &attr);
-        } else if let Some(file) = self.files.get(&ino) {
-            // File attributes
-            let ttl = Duration::from_secs(1);
-            reply.attr(&ttl, &file.attrs);
-        } else {
-            reply.error(ENOENT);
+        match self.files.get(&ino) {
+            Some(file) => {
+                let attr = &file.attrs;
+                let ttl = Duration::from_secs(1);
+                reply.attr(&ttl, attr);
+            },
+            None => reply.error(ENOENT),
         }
     }
 
-    fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        if parent != self.root_inode {
+    fn rename(&mut self, _req: &Request, parent: u64, name: &OsStr, newparent: u64, newname: &OsStr, _flags: u32, reply: ReplyEmpty) {
+        let old_name = name.to_str().unwrap().to_string();
+        let new_name = newname.to_str().unwrap().to_string();
+        self.rename(parent, old_name, newparent, new_name);
+        reply.ok();
+    }
+
+    fn write(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, data: &[u8], _write_flags: u32, _flags: i32, _lock_owner: Option<u64>, reply: ReplyWrite) {
+        let file: &mut File = match self.files.get_mut(&ino) {
+            Some(f) => f,
+            None => {
+                reply.error(ENOENT);
+                return ;
+            }
+        };
+
+        if file.attrs.kind == FileType::Directory {
             reply.error(ENOENT);
+            return ;
+        }
+
+        if file.data.is_none() {
+            file.data = Some(Vec::new());
+        }
+
+        let buffer = file.data.as_mut().unwrap();
+        let offset = offset as usize;
+        let required_size = offset + data.len();
+
+        if buffer.len() < required_size {
+            buffer.resize(required_size, 0);
+        }
+
+        buffer[offset..offset + data.len()].copy_from_slice(data);
+        file.attrs.size = buffer.len() as u64;
+        reply.written(data.len() as u32);
+    }
+
+    fn access(&mut self, _req: &Request, ino: u64, mask: i32, reply: ReplyEmpty) {
+        println!("Calling to access...");
+
+        let file = match self.files.get(&ino) {
+            Some(f) => f,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let perm = file.attrs.perm;
+
+        const R_OK: i32 = 4;
+        const W_OK: i32 = 2;
+        const X_OK: i32 = 1;
+
+        if (mask & R_OK) != 0 && (perm & 0o444 == 0) {
+            reply.error(libc::EACCES);
             return;
         }
 
-        let name_str = name.to_str().unwrap();
-
-        if let Some(file) = self.find_file_by_name(name_str) {
-            let ttl = Duration::from_secs(1);
-            reply.entry(&ttl, &file.attrs, 0);
-        } else {
-            reply.error(ENOENT);
-        }
-    }
-
-    fn read(&mut self, _req: &Request, ino: u64, _fh: u64, _offset: i64, _size: u32, _flags: i32, _lock_owner: Option<u64>, reply: ReplyData) {
-        if let Some(file) = self.files.get(&ino) {
-            if let Some(data) = &file.data {
-                reply.data(&data.as_bytes());
-            } else {
-                reply.data(&[]);
-            }
-        } else {
-            reply.error(ENOENT);
-        }
-    }
-
-    fn readdir(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, mut reply: ReplyDirectory) {
-        if ino != self.root_inode {
-            reply.error(ENOENT);
+        if (mask & W_OK) != 0 && (perm & 0o222 == 0) {
+            reply.error(libc::EACCES);
             return;
         }
 
-        let entries = vec![
-            (self.root_inode, ".", FileType::Directory),
-            (self.root_inode, "..", FileType::Directory),
-        ];
-
-        let file_entries: Vec<_> = self.files.iter()
-            .map(|(inode, file)| (*inode, file.name.as_str(), FileType::RegularFile))
-            .collect();
-
-        // Add all entries
-        for (i, (inode, name, file_type)) in entries.iter().chain(file_entries.iter()).enumerate() {
-            if i as i64 >= offset {
-                if reply.add(*inode, (i + 1) as i64, *file_type, name) {
-                    break;
-                }
-            }
+        if (mask & X_OK) != 0 && (perm & 0o111 == 0) {
+            reply.error(libc::EACCES);
+            return;
         }
 
         reply.ok();
     }
 
-    // Stub implementations for other required methods (just to test read-only FS)
-    fn rename(&mut self, _req: &Request, _parent: u64, _name: &OsStr, _newparent: u64, _newname: &OsStr, _flags: u32, reply: ReplyEmpty) {
-        reply.error(libc::EROFS); // Read-only filesystem
+    fn create(&mut self, _req: &Request, parent: u64, name: &OsStr, _mode: u32, _umask: u32, flags: i32, reply: ReplyCreate) {
+        let file_name = name.to_str().unwrap().to_string();
+        self.push(file_name, None, Some(parent), false);
+        let actual_inode = INODE_COUNTER.load(Ordering::Relaxed) - 1;
+        
+        match self.files.get(&actual_inode) {
+            Some(file) => {
+                let attr = &file.attrs;
+                let ttl = Duration::from_secs(1);
+                reply.created(&ttl, attr, 0, 0, flags.try_into().unwrap());
+            },
+            None => reply.error(ENOENT),
+        }
     }
 
-    fn rmdir(&mut self, _req: &Request, _parent: u64, _name: &OsStr, reply: ReplyEmpty) {
-        reply.error(libc::EROFS); // Read-only filesystem
+    fn open(&mut self, _req: &Request, ino: u64, flags: i32, reply: ReplyOpen) {
+        let file = match self.files.get(&ino) {
+            Some(f) => f,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let write_mode = flags & (libc::O_WRONLY | libc::O_RDWR) != 0;
+        if file.attrs.kind == FileType::Directory && write_mode {
+            reply.error(libc::EISDIR);
+            return;
+        }
+
+        println!("open called for ino={}", ino);
+        let fh = ino;
+        reply.opened(fh, 0);
+    }
+
+    fn setattr(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        mode: Option<u32>,
+        _uid: Option<u32>,
+        _gid: Option<u32>,
+        size: Option<u64>,
+        _atime: Option<fuser::TimeOrNow>,
+        _mtime: Option<fuser::TimeOrNow>,
+        _ctime: Option<SystemTime>,
+        _fh: Option<u64>,
+        _crtime: Option<SystemTime>,
+        _chgtime: Option<SystemTime>,
+        _bkuptime: Option<SystemTime>,
+        _flags: Option<u32>,
+        reply: ReplyAttr,
+    ) {
+        let file = match self.files.get_mut(&ino) {
+            Some(f) => f,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        if let Some(m) = mode {
+            file.attrs.perm = (m & 0o777) as u16;
+        }
+
+        if let Some(sz) = size {
+            if let Some(data) = file.data.as_mut() {
+                data.resize(sz as usize, 0);
+            }
+            file.attrs.size = sz;
+        }
+
+        reply.attr(&Duration::new(1, 0), &file.attrs);
+    }
+
+    fn mkdir(&mut self, _req: &Request, parent: u64, name: &OsStr, _mode: u32, _umask: u32, reply: ReplyEntry) { 
+        let file_name = match name.to_str() {
+            Some(n) => n,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+        self.push(file_name.to_string(), None, Some(parent), true);
+        let actual_inode = INODE_COUNTER.load(Ordering::Relaxed) - 1;
+        let file = self.files.get(&actual_inode).unwrap();
+
+        reply.entry(&Duration::new(1, 0), &file.attrs, 0);
+    }
+
+    fn rmdir(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        let name = match name.to_str() {
+            Some(n) => n,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let children = match self.files.get(&parent) {
+            Some(f) => f.children.clone(),
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let mut target_inode: Option<u64> = None;
+
+        for child_inode in children {
+            if let Some(child) = self.files.get(&child_inode) {
+                if child.name == name {
+                    if child.attrs.kind != FileType::Directory {
+                        reply.error(libc::ENOTDIR);
+                        return;
+                    }
+
+                    if !child.children.is_empty() {
+                        reply.error(libc::ENOTEMPTY);
+                        return;
+                    }
+
+                    target_inode = Some(child_inode);
+                    break;
+                }
+            }
+        }
+
+        let target_inode = match target_inode {
+            Some(i) => i,
+            None => {
+                reply.error(ENOENT);
+                return ;
+            }
+        };
+
+        if let Some(parent_file) = self.files.get_mut(&parent) {
+            parent_file.children.retain(|&x| x != target_inode);
+        }
+
+        self.files.remove(&target_inode);
+        reply.ok();
+    }
+
+    fn read(&mut self, _req: &Request, ino: u64, _fh: u64, _offset: i64, _size: u32, _flags: i32, _lock_owner: Option<u64>, reply: ReplyData) {
+        let file = match self.files.get(&ino) {
+            Some(f) => f,
+            None => {
+                reply.error(ENOENT);
+                return ;
+            }
+        };
+
+        if file.attrs.kind == FileType::Directory {
+            reply.error(ENOENT);
+            return ;
+        }
+
+        let data = match &file.data {
+            Some(d) => d,
+            None => {
+                reply.data(&[]);
+                return ;
+            }
+        };
+
+        reply.data(&data);
+    }
+
+    fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
+        let name_str = name.to_str().unwrap().to_string();
+
+        let parent_file = match self.files.get(&parent) {
+            Some(p) => p,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let mut found_inode: Option<u64> = None;
+
+        for &child_inode in &parent_file.children {
+            if let Some(child) = self.files.get(&child_inode) {
+                if child.name == name_str {
+                    found_inode = Some(child_inode);
+                    break;
+                }
+            }
+        }
+
+        let inode = match found_inode {
+            Some(i) => i,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let file = self.files.get(&inode).unwrap();
+        let attr = &file.attrs;
+
+        let ttl = Duration::from_secs(1);
+        reply.entry(&ttl, attr, 0);
+    }
+
+    fn readdir(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, mut reply: ReplyDirectory) { 
+        let dir = match self.files.get(&ino) {
+            Some(f) => f,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        if dir.attrs.kind != FileType::Directory {
+            reply.error(ENOENT);
+            return;
+        }
+
+        if offset == 0 {
+            let _ = reply.add(ino, 1, FileType::Directory, ".");
+
+            let parent = dir.parent.unwrap_or(ino);
+            let _ = reply.add(parent, 2, FileType::Directory, "..");
+        }
+
+        let mut index = offset - 2;
+        if index < 0 { index = 0; }
+
+        let children = &dir.children;
+
+        for (i, &child_inode) in children.iter().enumerate().skip(index as usize) { 
+            if let Some(child) = self.files.get(&child_inode) {
+                let next_offset = 3 + i as i64; 
+                let _ = reply.add(child.inode, next_offset, child.attrs.kind, child.name.as_str());
+            }
+        }
+
+        reply.ok();
     }
 }
 
 fn main() {
-    println!("=== QR Filesystem with Passphrase Protection ===");
-    
-    let mut original_fs = QRFileSystem::new();
-    
-    println!("\n1. Creating test filesystem structure...");
-    
-    original_fs.add_file("readme.txt".to_string(), 
-                     Some(FileData::Text("Welcome to QR Filesystem!\nThis is a passphrase-protected test file.\n\nRemember your passphrase to access this filesystem!".to_string())));
-    
-    original_fs.add_file("note.txt".to_string(), 
-                     Some(FileData::Text("This is a simple note in a protected filesystem.".to_string())));
-    
-    original_fs.add_file("config.json".to_string(), 
-                     Some(FileData::Text(r#"{"version": "1.0", "author": "QR FS", "protected": true}"#.to_string())));
-    
-    original_fs.add_file("data.bin".to_string(), 
-                     Some(FileData::Binary(vec![0x00, 0x01, 0x02, 0x03, 0x04, 0x05])));
+    let mut fs = QRFileSystem::new();
 
-    println!("\nOriginal structure:");
-    for (inode, file) in &original_fs.files {
-        println!("  {}: '{}' ({} bytes)", inode, file.name, file.attrs.size);
-    }
+    fs.push("/".to_string(), None, None, true);
+    fs.push("dirA".to_string(), None, Some(1), true);
+    fs.push("fileB.txt".to_string(), Some(b"Contenido B".to_vec()), Some(1), false);
+    fs.push("fileC.txt".to_string(), Some(b"Contenido C".to_vec()), Some(1), false);
 
-    let test_dir = "./qr_test_simple";
-    let _ = fs::remove_dir_all(test_dir);
-
-    // Get passphrase from command line or use default for testing
-    let passphrase = if let Some(pass) = env::args().nth(1) {
-        pass
-    } else {
-        println!("\nNo passphrase provided via command line.");
-        println!("Using default passphrase: 'test123' for demonstration.");
-        "test123".to_string()
-    };
-
-    println!("\n2. Exporting to QR codes with passphrase...");
-    if let Err(e) = original_fs.export_files_as_qr(test_dir, &passphrase) {
-        eprintln!("Export failed: {}", e);
-        return;
-    }
-
-    println!("\n3. Testing import with correct passphrase...");
-    let mut imported_fs = QRFileSystem::new();
-    if let Err(e) = imported_fs.import_files_from_qr(test_dir, &passphrase) {
-        eprintln!("Import failed: {}", e);
-        return;
-    }
-
-    println!("\n4. Testing import with wrong passphrase...");
-    let mut failed_fs = QRFileSystem::new();
-    match failed_fs.import_files_from_qr(test_dir, "wrong_password") {
-        Ok(_) => {
-            eprintln!("ERROR: Import should have failed with wrong passphrase!");
+    let args: Vec<String> = env::args().collect();
+    
+    if args.len() > 1 && args[1] == "--export" {
+        let output_dir = if args.len() > 2 { &args[2] } else { "./qr_export" };
+        let passphrase = if args.len() > 3 { &args[3] } else { "default_passphrase" };
+        
+        println!("Exporting filesystem to QR codes...");
+        if let Err(e) = fs.export_files_as_qr(output_dir, passphrase) {
+            eprintln!("Export failed: {}", e);
             return;
         }
-        Err(e) => {
-            println!("✓ Correctly rejected wrong passphrase: {}", e);
+        println!("Export completed to: {}", output_dir);
+        return;
+    }
+    
+    if args.len() > 1 && args[1] == "--import" {
+        let input_dir = if args.len() > 2 { &args[2] } else { "./qr_export" };
+        let passphrase = if args.len() > 3 { &args[3] } else { "default_passphrase" };
+        
+        println!("Importing filesystem from QR codes...");
+        let mut imported_fs = QRFileSystem::new();
+        if let Err(e) = imported_fs.import_files_from_qr(input_dir, passphrase) {
+            eprintln!("Import failed: {}", e);
+            return;
         }
+        
+        fs = imported_fs;
+        println!("Import completed successfully!");
     }
 
-    println!("\n5. Mounting filesystem...");
-    let mountpoint = match env::args().nth(2) {
+    let mountpoint = match env::args().nth(if args.len() > 1 && (args[1] == "--export" || args[1] == "--import") { 4 } else { 1 }) {
         Some(p) => p,
         None => {
-            println!("No mountpoint provided. Skipping mount.");
-            println!("\n=== Test completed successfully! ===");
-            println!("You can manually mount with:");
-            println!("  mount.qrfs {} /path/to/mountpoint -p '{}'", test_dir, passphrase);
+            println!("Usage:");
+            println!("  Mount only: {} <MOUNTPOINT>", args[0]);
+            println!("  Export: {} --export [output_dir] [passphrase]", args[0]);
+            println!("  Import and mount: {} --import [input_dir] [passphrase] <MOUNTPOINT>", args[0]);
             return;
         }
     };
 
-    println!("Mounting at: {}", mountpoint);
-    match fuser::mount2(imported_fs, &mountpoint, &[]) {
-        Ok(_) => {
-            println!("Mounted successfully!");
-            println!("Try: ls -la {}", mountpoint);
-            println!("Try: cat {}/readme.txt", mountpoint);
-            println!("Try: cat {}/config.json", mountpoint);
-            println!("\nUse 'fusermount -u {}' to unmount", mountpoint);
-            println!("\n=== Test completed successfully! ===");
-        },
-        Err(e) => {
-            eprintln!("Mount failed: {:?}", e);
-            println!("\nNote: Mount might require root privileges or the mountpoint might not exist.");
-        }
+    println!("Mounting filesystem at: {}", mountpoint);
+    match fuser::mount2(fs, &mountpoint, &[]) {
+        Ok(_) => println!("Mounted successfully"),
+        Err(e) => println!("ERROR MOUNTING: {:?}", e),
     }
 }
