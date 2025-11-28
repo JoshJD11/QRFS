@@ -537,6 +537,7 @@ impl Filesystem for QRFileSystem {
     fn create(&mut self, _req: &Request, parent: u64, name: &OsStr, _mode: u32, _umask: u32, flags: i32, reply: ReplyCreate) {
         let file_name = name.to_str().unwrap().to_string();
         let inode = INODE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let _ = write_u64(&mut self.disk, INODE_COUNTER_START * BLOCK_SIZE, inode);
 
         let _ = self.push(inode, file_name, None, parent, &get_default_attrs(inode, 0, false));
 
@@ -634,6 +635,7 @@ impl Filesystem for QRFileSystem {
             }
         };
         let inode = INODE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let _ = write_u64(&mut self.disk, INODE_COUNTER_START * BLOCK_SIZE, inode);
         let _ = self.push(inode, file_name.to_string(), None, parent, &get_default_attrs(inode, 0, true));
         let file = self.files.get(&inode).unwrap();
 
@@ -827,12 +829,12 @@ fn main() -> std::io::Result<()> {
     let actual_inodes: u64 = read_u64(&mut fs.disk, INODE_COUNTER_START * BLOCK_SIZE)?; // may be a constant
     INODE_COUNTER.store(actual_inodes + 1, Ordering::Relaxed);
 
-    // COMMENT THE INSERTIONS THE SECOND TIME YOU RUN THIS.
-
     let ino1 = INODE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let ino2 = INODE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let ino3 = INODE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let ino4 = INODE_COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    write_u64(&mut fs.disk, INODE_COUNTER_START * BLOCK_SIZE, ino4)?;
 
     let _ = fs.push(ino1, "/".to_string(), None, 0, &get_default_attrs(ino1, 0, true));
     let _ = fs.push(ino2, "pingapeta".to_string(), None, 1, &get_default_attrs(ino2, 0, true));
