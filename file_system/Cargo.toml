@@ -31,10 +31,6 @@ path = "src/bin/fsck.rs"
 name = "mount-qrfs"
 path = "src/bin/mountqrfs.rs"
 
-[[bin]]
-name = "lector-qrfs"
-path = "src/bin/lector.rs"
-
 [dependencies]
 fuser = "0.16.0"
 libc = "0.2.177"
