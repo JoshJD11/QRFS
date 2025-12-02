@@ -23,7 +23,7 @@ fn main() -> std::io::Result<()> {
     
     println!("Checking filesystem consistency for: {}", disk_path);
     
-    let mut fs = QRFileSystem::new(disk_path);
+    let mut fs = QRFileSystem::new(disk_path, "null");
     
     match fs.load_fs_from_disk() {
         Ok(_) => {

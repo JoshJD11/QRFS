@@ -27,7 +27,7 @@ fn main() -> std::io::Result<()> {
         initialize_new_disk(disk_path)?;
     }
 
-    let mut fs = QRFileSystem::new(disk_path);
+    let mut fs = QRFileSystem::new(disk_path, "null");
     fs.load_fs_from_disk()?;
 
     let actual_inodes: u64 = read_u64(&mut fs.disk, INODE_COUNTER_START * BLOCK_SIZE)?;

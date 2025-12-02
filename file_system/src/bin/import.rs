@@ -27,7 +27,7 @@ fn main() -> std::io::Result<()> {
         initialize_new_disk(disk_path)?;
     }
 
-    let mut fs = QRFileSystem::new(disk_path);
+    let mut fs = QRFileSystem::new(disk_path, "null");
     if let Err(e) = fs.import_files_from_qr(input_dir, passphrase) {
         eprintln!("Import failed: {}", e);
         return Ok(());
