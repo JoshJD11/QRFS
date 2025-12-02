@@ -3,10 +3,11 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64};
 use std::time::Duration;
 use std::ffi::OsStr;
-use fuser::{FileAttr, FileType, Filesystem, Request, ReplyDirectory, ReplyAttr, ReplyData, ReplyEntry, ReplyEmpty, ReplyOpen, ReplyCreate, ReplyWrite};
+use fuser::{FileAttr, Filesystem, Request, ReplyDirectory, ReplyAttr, ReplyData, ReplyEntry, ReplyEmpty, ReplyOpen, ReplyCreate, ReplyWrite};
+pub use fuser::FileType;
 use libc::{ENOENT};
 use std::time::SystemTime;
-use qrcode::QrCode;
+use qrcode::{QrCode, EcLevel};
 use image::Luma;
 use data_encoding::BASE64;
 use std::fs;
@@ -123,7 +124,7 @@ pub struct FilesystemMetadata {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct FileEntry {
+pub struct FileEntry {
     pub inode: u64,
     pub name: String,
     pub qr_blocks: Vec<u32>,
@@ -416,10 +417,14 @@ pub struct QRFileSystem {
     pub inode_block_table: HashMap<u64, u64>,
     pub disk: File,
     pub bitmap: Vec<u8>,
+    pub mount_path: String,
+    pub auto_export_path: Option<String>,
+    pub passphrase: Option<String>,
+    pub modified: bool,
 }
 
 impl QRFileSystem {
-    pub fn new(path: &str) -> Self {
+    pub fn new(path: &str, mount_path: &str) -> Self {
         let mut disk_file = open_disk(path).unwrap();
         let bm = read_bitmap(&mut disk_file).unwrap();
         Self {
@@ -427,7 +432,22 @@ impl QRFileSystem {
             inode_block_table: HashMap::new(),
             disk: disk_file,
             bitmap: bm,
+            mount_path: mount_path.to_string(),
+            auto_export_path: None,
+            passphrase: None,
+            modified: false,
         }
+    }
+
+    pub fn enable_auto_export(&mut self, export_path: &str, passphrase: &str) {
+        self.auto_export_path = Some(export_path.to_string());
+        self.passphrase = Some(passphrase.to_string());
+        println!("Auto-export enabled to: {}", export_path);
+        println!("Passphrase: {}", passphrase);
+    }
+    
+    pub fn mark_modified(&mut self) {
+        self.modified = true;
     }
 
     pub fn fill_children(&mut self) {
@@ -522,7 +542,10 @@ impl QRFileSystem {
     pub fn binary_to_qr(&self, binary_data: &[u8], output_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         let base64_data = BASE64.encode(binary_data);
         
-        let code = QrCode::new(base64_data.as_bytes())?;
+        let code = QrCode::with_error_correction_level(
+            base64_data.as_bytes(), 
+            EcLevel::H
+        )?;
         
         let image = code.render::<Luma<u8>>()
             .min_dimensions(200, 200)
@@ -574,8 +597,36 @@ impl QRFileSystem {
         passphrase.hash(&mut hasher);
         format!("{:x}", hasher.finish())
     }
+
+    fn clear_export_directory(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let path = std::path::Path::new(path);
+        
+        if !path.exists() {
+            return Ok(());
+        }
+        
+        
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let file_path = entry.path();
+            
+            if let Some(ext) = file_path.extension() {
+                if ext == "png" {
+                    std::fs::remove_file(&file_path)?;
+                } else if file_path.is_file() && file_path.file_name().unwrap() != ".gitkeep" {
+                    println!("  Warning: Non-QR file found: {}", file_path.display());
+                }
+            }
+        }
+        
+        Ok(())
+    }
     
     pub fn export_files_as_qr(&self, output_dir: &str, passphrase: &str) -> Result<(), Box<dyn std::error::Error>> {
+        // if let Err(e) = self.clear_export_directory(output_dir) {
+        //     return Err(format!("Failed to clear export directory '{}': {}", output_dir, e).into());
+        // }
+    
         fs::create_dir_all(output_dir)?;
         
         println!("Exporting filesystem structure with passphrase protection...");
@@ -615,7 +666,7 @@ impl QRFileSystem {
         println!("Directory metadata requires {} QR blocks", metadata_chunks.len());
         
         for (chunk_index, chunk) in metadata_chunks.iter().enumerate() {
-            let qr_path = format!("{}/file_{:03}.png", output_dir, current_block);
+            let qr_path = format!("{}/{:03}.png", output_dir, current_block);
             self.binary_to_qr(chunk, &qr_path)?;
             println!("  Created directory block {}: {}", chunk_index, qr_path);
             current_block += 1;
@@ -631,7 +682,7 @@ impl QRFileSystem {
                     println!("Exporting file '{}' as {} QR blocks...", file_entry.name, data_chunks.len());
                     
                     for (chunk_index, chunk) in data_chunks.iter().enumerate() {
-                        let qr_path = format!("{}/file_{:03}.png", output_dir, current_block);
+                        let qr_path = format!("{}/{:03}.png", output_dir, current_block);
                         self.binary_to_qr(chunk, &qr_path)?;
                         file_entry.qr_blocks[chunk_index] = current_block;
                         println!("  Created file block {}: {}", current_block, qr_path);
@@ -650,11 +701,11 @@ impl QRFileSystem {
         
         for (chunk_index, chunk) in final_metadata_chunks.iter().enumerate() {
             if chunk_index < directory_blocks_count as usize {
-                let qr_path = format!("{}/file_{:03}.png", output_dir, chunk_index as u32);
+                let qr_path = format!("{}/{:03}.png", output_dir, chunk_index as u32);
                 self.binary_to_qr(chunk, &qr_path)?;
                 println!("  Updated directory block {} with final metadata", chunk_index);
             } else {
-                let qr_path = format!("{}/file_{:03}.png", output_dir, current_block);
+                let qr_path = format!("{}/{:03}.png", output_dir, current_block);
                 self.binary_to_qr(chunk, &qr_path)?;
                 println!("  Added directory block {}: {}", current_block, qr_path);
                 current_block += 1;
@@ -681,8 +732,9 @@ impl QRFileSystem {
         let mut final_metadata = None;
         
         loop {
-            let qr_path = format!("{}/file_{:03}.png", input_dir, current_block);
+            let qr_path = format!("{}/{:03}.png", input_dir, current_block);
             if !std::path::Path::new(&qr_path).exists() {
+                print!("shouln't happen");
                 break;
             }
             
@@ -690,6 +742,7 @@ impl QRFileSystem {
                 Ok(data) => {
                     directory_blocks.push(data);
                     current_block += 1;
+                    println!("  Read directory block {}", current_block - 1);
                     
                     let combined_data: Vec<u8> = directory_blocks.iter().flatten().cloned().collect();
                     if let Ok(combined_str) = String::from_utf8(combined_data.clone()) {
@@ -759,7 +812,7 @@ impl QRFileSystem {
             
             if !file_entry.qr_blocks.is_empty() {
                 for &block_num in &file_entry.qr_blocks {
-                    let qr_path = format!("{}/file_{:03}.png", input_dir, block_num);
+                    let qr_path = format!("{}/{:03}.png", input_dir, block_num);
                     match self.qr_to_binary(&qr_path) {
                         Ok(chunk_data) => {
                             file_data.extend_from_slice(&chunk_data);
@@ -1156,4 +1209,30 @@ impl Filesystem for QRFileSystem {
 
         reply.ok();
     }
+
+    fn destroy(&mut self) {
+        println!("FUSE destroy called - filesystem is unmounting");
+        
+        if self.auto_export_path.is_some() {
+            let export_path = self.auto_export_path.as_ref().unwrap();
+            let passphrase = self.passphrase.as_ref().unwrap();
+            
+            println!("Auto-exporting on unmount...");
+            if let Err(e) = self.export_files_as_qr(export_path, passphrase) {
+                eprintln!("Export failed: {}", e);
+                // Try to save to a fallback location
+                let fallback = format!("{}/emergency_backup_{}", 
+                    std::env::temp_dir().display(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs()
+                );
+                let _ = self.export_files_as_qr(&fallback, passphrase);
+                eprintln!("Emergency backup saved to: {}", fallback);
+            }
+        }
+    }
+
+
 }
