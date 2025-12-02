@@ -31,13 +31,6 @@ fn main() -> std::io::Result<()> {
         return Ok(());
     }
     
-    println!("=== QR Filesystem Mount ===");
-    println!("QR directory: {}", qr_directory);
-    println!("Passphrase: {}", if passphrase.len() > 5 { 
-        format!("{}...", &passphrase[..3]) 
-    } else { 
-        "***".to_string() 
-    });
     
     let temp_dir = std::env::temp_dir();
     let pid = std::process::id();
@@ -48,7 +41,7 @@ fn main() -> std::io::Result<()> {
     let disk_path = temp_dir.join(format!("qrfs_temp_{}_{}.bin", pid, timestamp));
     let disk_path_str = disk_path.to_str().unwrap();
     
-    println!("Temporary disk: {}", disk_path_str);
+    // println!("Temporary disk: {}", disk_path_str);
     
     let qr_dir_path = Path::new(qr_directory);
     if qr_dir_path.exists() {

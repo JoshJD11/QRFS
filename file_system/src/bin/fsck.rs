@@ -94,7 +94,6 @@ fn main() -> std::io::Result<()> {
             println!("1. Check if passphrase is correct");
             println!("2. Ensure all QR code files are intact");
             println!("3. Verify directory contains complete set of QR codes");
-            println!("4. Check if QR codes were generated with same version");
         }
     }
     

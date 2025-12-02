@@ -35,11 +35,6 @@ fn main() -> std::io::Result<()> {
     println!("=== QR Filesystem Mount ===");
     println!("QR directory: {}", qr_directory);
     println!("Mount point: {}", mountpoint);
-    println!("Passphrase: {}", if passphrase.len() > 5 { 
-        format!("{}...", &passphrase[..3]) 
-    } else { 
-        "***".to_string() 
-    });
     
     let temp_dir = std::env::temp_dir();
     let pid = std::process::id();
@@ -50,33 +45,23 @@ fn main() -> std::io::Result<()> {
     let disk_path = temp_dir.join(format!("qrfs_temp_{}_{}.bin", pid, timestamp));
     let disk_path_str = disk_path.to_str().unwrap();
     
-    println!("Temporary disk: {}", disk_path_str);
+    // println!("Temporary disk: {}", disk_path_str);
     
     let qr_dir_path = Path::new(qr_directory);
     if qr_dir_path.exists() {
-        println!("Found QR directory, attempting import...");
         
         initialize_new_disk(disk_path_str)?;
         let mut fs = QRFileSystem::new(disk_path_str, qr_directory);
         
         match fs.import_files_from_qr(qr_directory, &passphrase) {
             Ok(_) => {
-                // Update inode counter on disk
                 write_u64(&mut fs.disk, INODE_COUNTER_START * BLOCK_SIZE, INODE_COUNTER.load(Ordering::Relaxed))?;
-                println!("Successfully imported from QR codes!");
-                println!("Filesystem has {} entries", fs.files.len());
                 
-                // Enable auto-export on unmount
                 fs.enable_auto_export(qr_directory, &passphrase);
                 
-                // Mount the imported filesystem
-                println!("Mounting at: {}", mountpoint);
                 match fuser::mount2(fs, mountpoint, &[]) {
                     Ok(_) => {
                         println!("\nMounted successfully!");
-                        println!("Filesystem imported from: {}", qr_directory);
-                        println!("Use 'fusermount -u {}' to unmount", mountpoint);
-                        println!("\nNote: Changes will be auto-exported to QR codes on unmount");
                     },
                     Err(e) => {
                         eprintln!("Mount failed: {:?}", e);
@@ -108,16 +93,11 @@ fn create_new_filesystem(disk_path: &str, mountpoint: &str, qr_directory: &str, 
     
     fs.enable_auto_export(qr_directory, passphrase);
     
-    println!("Initialized new filesystem with root directory");
     println!("Mounting at: {}", mountpoint);
     
     match fuser::mount2(fs, mountpoint, &[]) {
         Ok(_) => {
             println!("\nMounted successfully!");
-            println!("New filesystem created");
-            println!("QR codes will be saved to: {}", qr_directory);
-            println!("Use 'fusermount -u {}' to unmount", mountpoint);
-            println!("\nNote: Changes will be auto-exported to QR codes on unmount");
         },
         Err(e) => {
             eprintln!("Mount failed: {:?}", e);

@@ -348,7 +348,7 @@ pub fn initialize_new_disk(path: &str) -> std::io::Result<()> {
     write_bitmap(&mut f, &bitmap)?;
 
     f.sync_all()?;
-    println!("Disk initialized: '{}' ({} bytes)", path, total_size);
+    // println!("Disk initialized: '{}' ({} bytes)", path, total_size);
     Ok(())
 }
 
@@ -442,8 +442,8 @@ impl QRFileSystem {
     pub fn enable_auto_export(&mut self, export_path: &str, passphrase: &str) {
         self.auto_export_path = Some(export_path.to_string());
         self.passphrase = Some(passphrase.to_string());
-        println!("Auto-export enabled to: {}", export_path);
-        println!("Passphrase: {}", passphrase);
+        // println!("Auto-export enabled to: {}", export_path);
+        // println!("Passphrase: {}", passphrase);
     }
     
     pub fn mark_modified(&mut self) {
@@ -629,7 +629,7 @@ impl QRFileSystem {
     
         fs::create_dir_all(output_dir)?;
         
-        println!("Exporting filesystem structure with passphrase protection...");
+        // println!("Exporting filesystem structure with passphrase protection...");
         
         let mut metadata = FilesystemMetadata {
             version: 1,
@@ -654,21 +654,21 @@ impl QRFileSystem {
                 attrs: SerializableFileAttr::from_file_attr(&file.attrs),
             };
             metadata.files.push(entry);
-            println!("  - {} (inode: {}, {} chunks)", fixed_name_to_str(&file.name), file.inode, chunk_count);
+            // println!("  - {} (inode: {}, {} chunks)", fixed_name_to_str(&file.name), file.inode, chunk_count);
         }
         
         let mut current_block = 0;
         
         let metadata_json = serde_json::to_string(&metadata)?;
-        println!("Initial metadata size: {} bytes", metadata_json.len());
+        // println!("Initial metadata size: {} bytes", metadata_json.len());
         
         let metadata_chunks = self.split_data_for_qr(metadata_json.as_bytes());
-        println!("Directory metadata requires {} QR blocks", metadata_chunks.len());
+        // println!("Directory metadata requires {} QR blocks", metadata_chunks.len());
         
         for (chunk_index, chunk) in metadata_chunks.iter().enumerate() {
             let qr_path = format!("{}/{:03}.png", output_dir, current_block);
             self.binary_to_qr(chunk, &qr_path)?;
-            println!("  Created directory block {}: {}", chunk_index, qr_path);
+            // println!("  Created directory block {}: {}", chunk_index, qr_path);
             current_block += 1;
         }
         
@@ -679,13 +679,13 @@ impl QRFileSystem {
                 if let Some(file_data) = &file.data {
                     let data_chunks = self.split_data_for_qr(&file_data);
                     
-                    println!("Exporting file '{}' as {} QR blocks...", file_entry.name, data_chunks.len());
+                    // println!("Exporting file '{}' as {} QR blocks...", file_entry.name, data_chunks.len());
                     
                     for (chunk_index, chunk) in data_chunks.iter().enumerate() {
                         let qr_path = format!("{}/{:03}.png", output_dir, current_block);
                         self.binary_to_qr(chunk, &qr_path)?;
                         file_entry.qr_blocks[chunk_index] = current_block;
-                        println!("  Created file block {}: {}", current_block, qr_path);
+                        // println!("  Created file block {}: {}", current_block, qr_path);
                         current_block += 1;
                     }
                 }
@@ -703,11 +703,11 @@ impl QRFileSystem {
             if chunk_index < directory_blocks_count as usize {
                 let qr_path = format!("{}/{:03}.png", output_dir, chunk_index as u32);
                 self.binary_to_qr(chunk, &qr_path)?;
-                println!("  Updated directory block {} with final metadata", chunk_index);
+                // println!("  Updated directory block {} with final metadata", chunk_index);
             } else {
                 let qr_path = format!("{}/{:03}.png", output_dir, current_block);
                 self.binary_to_qr(chunk, &qr_path)?;
-                println!("  Added directory block {}: {}", current_block, qr_path);
+                // println!("  Added directory block {}: {}", current_block, qr_path);
                 current_block += 1;
             }
         }
@@ -715,14 +715,14 @@ impl QRFileSystem {
         println!("Export completed! Total files: {}, Total QR blocks: {}", 
                 metadata.files.len(), current_block);
         println!("Passphrase protection enabled. Remember your passphrase: '{}'", passphrase);
-        println!("Next inode counter will be: {}", metadata.next_inode);
+        // println!("Next inode counter will be: {}", metadata.next_inode);
         
         Ok(())
     }
     
     pub fn import_files_from_qr(&mut self, input_dir: &str, expected_passphrase: &str) -> Result<(), Box<dyn std::error::Error>> {
-        println!("Importing from QR codes in: {}", input_dir);
-        println!("Verifying passphrase...");
+        // println!("Importing from QR codes in: {}", input_dir);
+        // println!("Verifying passphrase...");
         
         let expected_hash = self.hash_passphrase(expected_passphrase);
         
@@ -734,7 +734,6 @@ impl QRFileSystem {
         loop {
             let qr_path = format!("{}/{:03}.png", input_dir, current_block);
             if !std::path::Path::new(&qr_path).exists() {
-                print!("shouln't happen");
                 break;
             }
             
@@ -742,7 +741,7 @@ impl QRFileSystem {
                 Ok(data) => {
                     directory_blocks.push(data);
                     current_block += 1;
-                    println!("  Read directory block {}", current_block - 1);
+                    // println!("  Read directory block {}", current_block - 1);
                     
                     let combined_data: Vec<u8> = directory_blocks.iter().flatten().cloned().collect();
                     if let Ok(combined_str) = String::from_utf8(combined_data.clone()) {
@@ -797,8 +796,8 @@ impl QRFileSystem {
         
         let metadata = final_metadata.ok_or("Failed to parse filesystem metadata")?;
         
-        println!("Found {} entries in directory", metadata.files.len());
-        println!("Restoring inode counter to: {}", metadata.next_inode);
+        // println!("Found {} entries in directory", metadata.files.len());
+        // println!("Restoring inode counter to: {}", metadata.next_inode);
         
         self.files.clear();
         self.inode_block_table.clear();
@@ -843,8 +842,8 @@ impl QRFileSystem {
         }
         
         println!("\n=== Import completed successfully ===");
-        println!("Total entries: {}", self.files.len());
-        println!("Inode counter restored to: {}", metadata.next_inode);
+        // println!("Total entries: {}", self.files.len());
+        // println!("Inode counter restored to: {}", metadata.next_inode);
         
         Ok(())
     }
@@ -1211,7 +1210,7 @@ impl Filesystem for QRFileSystem {
     }
 
     fn destroy(&mut self) {
-        println!("FUSE destroy called - filesystem is unmounting");
+        // println!("FUSE destroy called - filesystem is unmounting");
         
         if self.auto_export_path.is_some() {
             let export_path = self.auto_export_path.as_ref().unwrap();
