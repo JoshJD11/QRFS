@@ -1,5 +1,6 @@
+pub use std::sync::atomic::Ordering;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64};
 use std::time::Duration;
 use std::ffi::OsStr;
 use fuser::{FileAttr, FileType, Filesystem, Request, ReplyDirectory, ReplyAttr, ReplyData, ReplyEntry, ReplyEmpty, ReplyOpen, ReplyCreate, ReplyWrite};
@@ -15,14 +16,16 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-const BLOCK_COUNT: u64 = 2048; 
-const BLOCK_SIZE: u64 = 512;
-const MAX_NAME_SIZE: usize = 25;
-const BITMAP_START: u64 = 0;
-const INODE_COUNTER_START: u64 = 1;
-const DATA_START: u64 = 2;
+pub use std::time::{UNIX_EPOCH};
 
-static INODE_COUNTER: AtomicU64 = AtomicU64::new(1);
+pub const BLOCK_COUNT: u64 = 2048; 
+pub const BLOCK_SIZE: u64 = 512;
+pub const MAX_NAME_SIZE: usize = 25;
+pub const BITMAP_START: u64 = 0;
+pub const INODE_COUNTER_START: u64 = 1;
+pub const DATA_START: u64 = 2;
+
+pub static INODE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
 pub struct SerializableFileAttr {
@@ -231,13 +234,13 @@ fn open_disk(path: &str) -> std::io::Result<File> {
     OpenOptions::new().read(true).write(true).create(true).open(path)
 }
 
-fn write_u64(file: &mut File, offset: u64, v: u64) -> std::io::Result<()> {
+pub fn write_u64(file: &mut File, offset: u64, v: u64) -> std::io::Result<()> {
     file.seek(SeekFrom::Start(offset))?;
     file.write_all(&v.to_le_bytes())?;
     Ok(())
 }
 
-fn read_u64(file: &mut File, offset: u64) -> std::io::Result<u64> {
+pub fn read_u64(file: &mut File, offset: u64) -> std::io::Result<u64> {
     let mut b = [0u8; 8];
     file.seek(SeekFrom::Start(offset))?;
     file.read_exact(&mut b)?;
@@ -330,7 +333,7 @@ fn read_block(f: &mut File, block_idx: u64) -> std::io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-fn initialize_new_disk(path: &str) -> std::io::Result<()> {
+pub fn initialize_new_disk(path: &str) -> std::io::Result<()> {
     let mut f = open_disk(path)?;
 
     let total_size = BLOCK_COUNT * BLOCK_SIZE;
@@ -348,7 +351,7 @@ fn initialize_new_disk(path: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-fn get_default_attrs(file_inode: u64, size: u64, is_folder: bool) -> FileAttr {
+pub fn get_default_attrs(file_inode: u64, size: u64, is_folder: bool) -> FileAttr {
     let now = SystemTime::now();
     FileAttr {
         ino: file_inode,
@@ -373,7 +376,7 @@ fn get_default_attrs(file_inode: u64, size: u64, is_folder: bool) -> FileAttr {
     }
 }
 
-struct FSEntry {
+pub struct FSEntry {
     pub inode: u64,
     pub name: [u8; 25],
     pub data: Option<Vec<u8>>,
@@ -390,7 +393,7 @@ fn fixed_name(name: &str) -> [u8; 25] {
     buf
 }
 
-fn fixed_name_to_str(buf: &[u8; 25]) -> &str {
+pub fn fixed_name_to_str(buf: &[u8; 25]) -> &str {
     let end = buf.iter().position(|&b| b == 0).unwrap_or(25);
     std::str::from_utf8(&buf[..end]).unwrap_or("")
 }
@@ -408,7 +411,7 @@ impl FSEntry {
     }
 }
 
-struct QRFileSystem {
+pub struct QRFileSystem {
     pub files: HashMap<u64, FSEntry>,
     pub inode_block_table: HashMap<u64, u64>,
     pub disk: File,
@@ -1154,248 +1157,3 @@ impl Filesystem for QRFileSystem {
         reply.ok();
     }
 }
-
-fn main() -> std::io::Result<()> {
-    let args: Vec<String> = env::args().collect();
-    
-    if args.len() > 1 {
-        match args[1].as_str() {
-            "--export" => {
-                let disk_path = if args.len() > 2 { &args[2] } else { "qrfs_disk.bin" };
-                let output_dir = if args.len() > 3 { &args[3] } else { "./qr_export" };
-                let passphrase = if args.len() > 4 { &args[4] } else { "test123" };
-                
-                println!("Loading filesystem from disk and exporting to QR codes...");
-                
-                let is_new_disk = !Path::new(disk_path).exists();
-                if is_new_disk {
-                    initialize_new_disk(disk_path)?;
-                }
-
-                let mut fs = QRFileSystem::new(disk_path);
-                fs.load_fs_from_disk()?;
-
-                let actual_inodes: u64 = read_u64(&mut fs.disk, INODE_COUNTER_START * BLOCK_SIZE)?;
-                INODE_COUNTER.store(actual_inodes + 1, Ordering::Relaxed);
-
-                println!("Filesystem loaded with {} entries", fs.files.len());
-                
-                println!("\nExporting to: {}", output_dir);
-                if let Err(e) = fs.export_files_as_qr(output_dir, passphrase) {
-                    eprintln!("Export failed: {}", e);
-                    return Ok(());
-                }
-                
-                println!("\n=== Export completed successfully! ===");
-                println!("QR codes saved to: {}", output_dir);
-                println!("Passphrase: '{}'", passphrase);
-                return Ok(());
-            }
-            
-            "--import" => {
-                let input_dir = if args.len() > 2 { &args[2] } else { "./qr_export" };
-                let passphrase = if args.len() > 3 { &args[3] } else { "test123" };
-                let disk_path = if args.len() > 4 { &args[4] } else { "qrfs_disk.bin" };
-                let mountpoint = if args.len() > 5 { &args[5] } else { 
-                    println!("No mountpoint specified for import.");
-                    println!("Usage: {} --import [input_dir] [passphrase] [disk_path] <MOUNTPOINT>", args[0]);
-                    return Ok(());
-                };
-                
-                println!("Importing filesystem from QR codes to disk...");
-                
-                let is_new_disk = !Path::new(disk_path).exists();
-                if is_new_disk {
-                    initialize_new_disk(disk_path)?;
-                }
-
-                let mut fs = QRFileSystem::new(disk_path);
-                if let Err(e) = fs.import_files_from_qr(input_dir, passphrase) {
-                    eprintln!("Import failed: {}", e);
-                    return Ok(());
-                }
-
-                write_u64(&mut fs.disk, INODE_COUNTER_START * BLOCK_SIZE, INODE_COUNTER.load(Ordering::Relaxed))?;
-                
-                println!("\nImported filesystem structure:");
-                for (inode, file) in &fs.files {
-                    let file_type = if file.attrs.kind == FileType::Directory { "dir" } else { "file" };
-                    let size_info = if file.attrs.kind == FileType::Directory { 
-                        format!("({} children)", file.children.len())
-                    } else {
-                        format!("({} bytes)", file.attrs.size)
-                    };
-                    println!("  [{}] {}: '{}' {} (parent: {})", 
-                            inode, file_type, fixed_name_to_str(&file.name), size_info, file.parent);
-                }
-                
-                println!("\nMounting at: {}", mountpoint);
-                match fuser::mount2(fs, mountpoint, &[]) {
-                    Ok(_) => {
-                        println!("Mounted successfully!");
-                        println!("Try these commands:");
-                        println!("  ls -la {}", mountpoint);
-                        println!("  cat {}/readme.txt", mountpoint);
-                        println!("\nUse 'fusermount -u {}' to unmount", mountpoint);
-                    },
-                    Err(e) => {
-                        eprintln!("Mount failed: {:?}", e);
-                        println!("Note: You may need to create the mountpoint directory first");
-                    }
-                }
-                return Ok(());
-            }
-            
-            "--test-roundtrip" => {
-                println!("Testing complete QR roundtrip with disk storage...");
-                
-                let temp_disk = "./test_disk.bin";
-                let temp_dir = "./test_roundtrip";
-                let passphrase = "test_passphrase";
-                
-                initialize_new_disk(temp_disk)?;
-                
-                let mut original_fs = QRFileSystem::new(temp_disk);
-                
-                original_fs.push(1, "/".to_string(), None, 0, &get_default_attrs(1, 0, true)).unwrap();
-                original_fs.push(2, "test_dir".to_string(), None, 1, &get_default_attrs(2, 0, true)).unwrap();
-                original_fs.push(3, "test_file.txt".to_string(), 
-                                Some(b"Hello QR World!".to_vec()), 
-                                1, &get_default_attrs(3, 15, false)).unwrap();
-                
-                write_u64(&mut original_fs.disk, INODE_COUNTER_START * BLOCK_SIZE, 4)?;
-                INODE_COUNTER.store(4, Ordering::Relaxed);
-                
-                println!("1. Exporting filesystem...");
-                if let Err(e) = original_fs.export_files_as_qr(temp_dir, passphrase) {
-                    eprintln!("Export failed: {}", e);
-                    let _ = std::fs::remove_file(temp_disk);
-                    return Ok(());
-                }
-                
-                println!("2. Importing filesystem to new disk...");
-                let import_disk = "./test_disk_import.bin";
-                initialize_new_disk(import_disk)?;
-                
-                let mut imported_fs = QRFileSystem::new(import_disk);
-                if let Err(e) = imported_fs.import_files_from_qr(temp_dir, passphrase) {
-                    eprintln!("Import failed: {}", e);
-                    let _ = std::fs::remove_file(temp_disk);
-                    let _ = std::fs::remove_file(import_disk);
-                    let _ = std::fs::remove_dir_all(temp_dir);
-                    return Ok(());
-                }
-                
-                write_u64(&mut imported_fs.disk, INODE_COUNTER_START * BLOCK_SIZE, INODE_COUNTER.load(Ordering::Relaxed))?;
-                
-                println!("3. Verifying imported data...");
-                let mut success = true;
-                
-                for (inode, original_file) in &original_fs.files {
-                    if let Some(imported_file) = imported_fs.files.get(inode) {
-                        if fixed_name_to_str(&original_file.name) != fixed_name_to_str(&imported_file.name) {
-                            eprintln!("Name mismatch for inode {}: '{}' vs '{}'", 
-                                    inode, fixed_name_to_str(&original_file.name), fixed_name_to_str(&imported_file.name));
-                            success = false;
-                        }
-                        
-                        if original_file.parent != imported_file.parent {
-                            eprintln!("Parent mismatch for inode {}: {} vs {}", 
-                                    inode, original_file.parent, imported_file.parent);
-                            success = false;
-                        }
-                        
-                        if original_file.attrs.kind != imported_file.attrs.kind {
-                            eprintln!("Type mismatch for inode {}: {:?} vs {:?}", 
-                                    inode, original_file.attrs.kind, imported_file.attrs.kind);
-                            success = false;
-                        }
-                        
-                        if let (Some(orig_data), Some(imp_data)) = (&original_file.data, &imported_file.data) {
-                            if orig_data != imp_data {
-                                eprintln!("Data mismatch for inode {}: {:?} vs {:?}", 
-                                        inode, orig_data, imp_data);
-                                success = false;
-                            }
-                        }
-                    } else {
-                        eprintln!("Missing file in imported FS: inode {}", inode);
-                        success = false;
-                    }
-                }
-                
-                let _ = std::fs::remove_file(temp_disk);
-                let _ = std::fs::remove_file(import_disk);
-                let _ = std::fs::remove_dir_all(temp_dir);
-                
-                if success {
-                    println!("=== Roundtrip test PASSED! ===");
-                } else {
-                    eprintln!("=== Roundtrip test FAILED! ===");
-                }
-                return Ok(());
-            }
-            
-            _ => { 
-                let mountpoint = &args[1];
-                let disk_path = if args.len() > 2 { &args[2] } else { "qrfs_disk.bin" };
-                
-                println!("Mounting filesystem from disk...");
-                
-                let is_new_disk = !Path::new(disk_path).exists();
-                if is_new_disk {
-                    initialize_new_disk(disk_path)?;
-                    println!("Created new disk: {}", disk_path);
-                }
-
-                let mut fs = QRFileSystem::new(disk_path);
-                fs.load_fs_from_disk()?;
-
-                let actual_inodes: u64 = read_u64(&mut fs.disk, INODE_COUNTER_START * BLOCK_SIZE)?;
-                INODE_COUNTER.store(actual_inodes + 1, Ordering::Relaxed);
-
-                if is_new_disk {
-                    fs.push(1, "/".to_string(), None, 0, &get_default_attrs(1, 0, true)).unwrap();
-                    write_u64(&mut fs.disk, INODE_COUNTER_START * BLOCK_SIZE, 2)?;
-                    INODE_COUNTER.store(2, Ordering::Relaxed);
-                }
-
-                println!("Filesystem loaded with {} entries", fs.files.len());
-                println!("Mounting at: {}", mountpoint);
-                
-                match fuser::mount2(fs, mountpoint, &[]) {
-                    Ok(_) => {
-                        println!("Mounted successfully!");
-                        println!("Use 'fusermount -u {}' to unmount", mountpoint);
-                        println!("\nYou can export this filesystem using:");
-                        println!("  {} --export {} ./export_dir your_passphrase", args[0], disk_path);
-                    },
-                    Err(e) => {
-                        eprintln!("Mount failed: {:?}", e);
-                        println!("Note: You may need to create the mountpoint directory first");
-                    }
-                }
-                return Ok(());
-            }
-        }
-    }
-    
-    println!("=== QR Filesystem with Disk Storage ===");
-    println!("Usage:");
-    println!("  {} <MOUNTPOINT> [disk_path]           - Mount filesystem from disk", args[0]);
-    println!("  {} --export [disk_path] [output_dir] [passphrase] - Export filesystem to QR codes", args[0]);
-    println!("  {} --import [input_dir] [passphrase] [disk_path] <MOUNTPOINT> - Import QR codes to disk and mount", args[0]);
-    println!("  {} --test-roundtrip                  - Test complete export/import cycle", args[0]);
-    println!("\nExamples:");
-    println!("  {} /mnt/qrfs                         # Mount from default disk", args[0]);
-    println!("  {} --export ./my_fs.bin ./qr_codes mypass  # Export to QR codes", args[0]);
-    println!("  {} --import ./qr_codes mypass ./new_fs.bin /mnt  # Import and mount", args[0]);
-    
-    Ok(())
-}
-
-// Note: if you cloned the repository, you have to make a dir to mount the fs out of the repo
-// run with cargo run -- ~/Desktop/fs
-// To unmount, run the command: fusermount -u ~/Desktop/fs
-// if you don't unmount, you'll run into errors next time you try cargo run.
-// TO RUN THE PROGRAM YOU HAVE TO USE OTHER TERMINAL, DO NOT USE THE VS CODE TERMINAL.

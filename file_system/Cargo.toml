@@ -1,13 +1,43 @@
 [package]
-name = "file_system"
+name = "qrfs"
 version = "0.1.0"
 edition = "2024"
+
+[[bin]]
+name = "qrfs-mount"
+path = "src/bin/mount.rs"
+
+[[bin]]
+name = "qrfs-export"
+path = "src/bin/export.rs"
+
+[[bin]]
+name = "qrfs-import"
+path = "src/bin/import.rs"
+
+[[bin]]
+name = "qrfs-check"
+path = "src/bin/check.rs"
+
+[[bin]]
+name = "mkfs.qrfs"
+path = "src/bin/mkfs.rs"
+
+[[bin]]
+name = "fsck.qrfs"
+path = "src/bin/fsch.rs"
+
+[[bin]]
+name = "mount.qrfs"
+path = "src/bin/mountqrfs.rs"
+
+[[bin]]
+name = "lector.qrfs"
+path = "src/bin/lector.rs"
 
 [dependencies]
 fuser = "0.16.0"
 libc = "0.2.177"
-rustc-serialize = "0.3.25"
-time = "0.3.44"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 qrcode = "0.13"
