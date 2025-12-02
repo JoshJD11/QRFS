@@ -13,8 +13,8 @@ import {
 
 export default function Home() {
     const [scanned, setScanned] = useState(false);
-    const SERVER_DATA_URL = "http://192.168.0.3:3000/upload-data";
-    const SERVER_FINISH_URL = "http://192.168.0.3:3000/finish-scanning";
+    const SERVER_DATA_URL = "http://192.168.0.12:3000/qr";
+    const SERVER_FINISH_URL = "http://192.168.0.12:3000/done";
 
     async function uploadRawData(rawData : string) {
         await fetch(SERVER_DATA_URL, {
