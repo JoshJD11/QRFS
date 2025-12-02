@@ -71,8 +71,9 @@ fn main() -> std::io::Result<()> {
             }
             Err(e) => {
                 println!("Import failed: {}", e);
-                println!("Creating new filesystem instead...");
-                create_new_filesystem(disk_path_str, mountpoint, qr_directory, &passphrase)?;
+
+                // println!("Creating new filesystem instead...");
+                // create_new_filesystem(disk_path_str, mountpoint, qr_directory, &passphrase)?;
             }
         }
     } else {

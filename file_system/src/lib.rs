@@ -575,7 +575,7 @@ impl QRFileSystem {
     }
     
     fn split_data_for_qr(&self, data: &[u8]) -> Vec<Vec<u8>> {
-        const MAX_QR_DATA_SIZE: usize = 900;
+        const MAX_QR_DATA_SIZE: usize = 512;
         
         let mut chunks = Vec::new();
         let mut remaining = data;
