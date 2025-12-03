@@ -812,7 +812,7 @@ impl Filesystem for QRFileSystem {
     }
 
     fn statfs(&mut self, _req: &Request, _ino: u64, reply: ReplyStatfs) {
-        let actual_cant_inodes = INODE_COUNTER.load(Ordering::Relaxed);
+        let actual_cant_inodes = INODE_COUNTER.load(Ordering::Relaxed) - 1;
         let free_blocks = BLOCK_COUNT - actual_cant_inodes - 2;
         reply.statfs(
             BLOCK_COUNT,
@@ -827,7 +827,6 @@ impl Filesystem for QRFileSystem {
     }
 
 }
-
 
 fn main() -> std::io::Result<()> {
 
