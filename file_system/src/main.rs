@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::env;
 use std::ffi::OsStr;
-use fuser::{ FileAttr, FileType, Filesystem, Request, ReplyDirectory, ReplyAttr, ReplyData, ReplyEntry, ReplyEmpty, ReplyOpen, ReplyCreate, ReplyWrite };
+use fuser::{ FileAttr, FileType, Filesystem, Request, ReplyDirectory, ReplyAttr, ReplyData, ReplyEntry, ReplyEmpty, ReplyOpen, ReplyCreate, ReplyWrite, ReplyStatfs };
 use libc::{ENOENT};
 
 
@@ -809,6 +809,21 @@ impl Filesystem for QRFileSystem {
         }
 
         reply.ok();
+    }
+
+    fn statfs(&mut self, _req: &Request, _ino: u64, reply: ReplyStatfs) {
+        let actual_cant_inodes = INODE_COUNTER.load(Ordering::Relaxed);
+        let free_blocks = BLOCK_COUNT - actual_cant_inodes - 2;
+        reply.statfs(
+            BLOCK_COUNT,
+            free_blocks,
+            free_blocks,
+            BLOCK_COUNT - 2,
+            (BLOCK_COUNT - 2) - actual_cant_inodes,
+            BLOCK_SIZE.try_into().unwrap(),
+            MAX_NAME_SIZE.try_into().unwrap(),
+            BLOCK_SIZE.try_into().unwrap(),
+        );
     }
 
 }
