@@ -35,6 +35,10 @@ path = "src/bin/mountqrfs.rs"
 name = "lector-qrfs"
 path = "src/bin/lector.rs"
 
+[[bin]]
+name = "toPDF-qrfs"
+path = "src/bin/toPDF.rs"
+
 [dependencies]
 fuser = "0.16.0"
 libc = "0.2.177"
@@ -47,3 +51,5 @@ rqrr = "0.10.0"
 ctrlc = "3.4"
 axum = "0.7"
 tokio = { version = "1", features = ["full"] }
+walkdir = "2.5.0"
+genpdf = { version = "0.2", features = ["images"] }
