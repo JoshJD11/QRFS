@@ -826,6 +826,10 @@ impl Filesystem for QRFileSystem {
         );
     }
 
+    fn fsync(&mut self, _req: &Request, _ino: u64, _fh: u64, _datasync: bool, reply: ReplyEmpty) { // Innecesary in the actual implementation but the teacher ask for this method
+        reply.ok();
+    }
+
 }
 
 fn main() -> std::io::Result<()> {
