@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64};
 use std::time::Duration;
 use std::ffi::OsStr;
-use fuser::{FileAttr, Filesystem, Request, ReplyDirectory, ReplyAttr, ReplyData, ReplyEntry, ReplyEmpty, ReplyOpen, ReplyCreate, ReplyWrite};
+use fuser::{FileAttr, Filesystem, Request, ReplyDirectory, ReplyAttr, ReplyData, ReplyEntry, ReplyEmpty, ReplyOpen, ReplyCreate, ReplyWrite, ReplyStatfs};
 pub use fuser::FileType;
 use libc::{ENOENT};
 use std::time::SystemTime;
@@ -1207,6 +1207,25 @@ impl Filesystem for QRFileSystem {
         }
 
         reply.ok();
+    }
+
+    fn fsync(&mut self, _req: &Request, _ino: u64, _fh: u64, _datasync: bool, reply: ReplyEmpty) { // Innecesary in the actual implementation but the teacher ask for this method
+        reply.ok();
+    }
+
+    fn statfs(&mut self, _req: &Request, _ino: u64, reply: ReplyStatfs) {
+        let actual_cant_inodes = INODE_COUNTER.load(Ordering::Relaxed) - 1;
+        let free_blocks = BLOCK_COUNT - actual_cant_inodes - 2;
+        reply.statfs(
+            BLOCK_COUNT,
+            free_blocks,
+            free_blocks,
+            BLOCK_COUNT - 2,
+            (BLOCK_COUNT - 2) - actual_cant_inodes,
+            BLOCK_SIZE.try_into().unwrap(),
+            MAX_NAME_SIZE.try_into().unwrap(),
+            BLOCK_SIZE.try_into().unwrap(),
+        );
     }
 
     fn destroy(&mut self) {
